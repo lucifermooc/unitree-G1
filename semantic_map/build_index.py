@@ -16,11 +16,18 @@ import embedder
 def load_places(path):
     """读取并检查地点数据，有问题直接报出是哪一条。"""
     with open(path, encoding="utf-8") as f:
-        places = json.load(f)
+        return validate_places(json.load(f))
 
+
+def validate_places(places):
+    """检查地点列表（建库和标注工具保存时共用）。"""
+    if not isinstance(places, list):
+        raise ValueError("地点数据必须是一个列表")
     seen_ids = set()
     for i, place in enumerate(places):
         where = f"第 {i + 1} 条地点"
+        if not isinstance(place, dict):
+            raise ValueError(f"{where}：格式不对")
         if not isinstance(place.get("id"), int) or place["id"] < 0:
             raise ValueError(f"{where}：id 必须是非负整数（Qdrant 的要求）")
         if place["id"] in seen_ids:

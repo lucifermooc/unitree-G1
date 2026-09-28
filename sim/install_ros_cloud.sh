@@ -2,6 +2,7 @@
 # 云端/没有 ROS apt 源的机器：用 micromamba + RoboStack 安装 ROS2 Jazzy + Nav2 + Cartographer + TurtleBot3 仿真。
 # 本地 Ubuntu 24.04 请直接用 apt 安装（见 sim/README.md），不需要这个脚本。
 set -euo pipefail
+SIM_DIR="$(cd "$(dirname "$0")" && pwd)"  # 下面会 cd 到别处，先记下绝对路径
 PREFIX=/opt/mamba
 export MAMBA_ROOT_PREFIX=$PREFIX/root
 
@@ -39,5 +40,5 @@ EOF
 
 # 语义地图依赖装进同一个 Python，导航程序才能同时 import rclpy 和语义地图
 $MAMBA_ROOT_PREFIX/envs/ros/bin/pip install -q torch --index-url https://download.pytorch.org/whl/cpu
-$MAMBA_ROOT_PREFIX/envs/ros/bin/pip install -q -r "$(dirname "$0")/../semantic_map/requirements.txt"
+$MAMBA_ROOT_PREFIX/envs/ros/bin/pip install -q -r "$SIM_DIR/../semantic_map/requirements.txt"
 echo "✅ 安装完成。使用：source sim/env.sh"
