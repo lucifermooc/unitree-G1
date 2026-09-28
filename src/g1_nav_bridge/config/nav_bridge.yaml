@@ -1,0 +1,31 @@
+g1_cmdvel_to_sport:
+  ros__parameters:
+    cmd_vel_topic: /cmd_vel_safe
+    # 调用G1 LocoClient::SetVelocity，并由常驻response订阅异步检查本体返回码。
+    duration: 0.5
+    # G1 双足不能原地转向。非零低速按方向提升到最小有效值（取代 smoother 死区置零）：
+    #   直行 vx>=vx_stop 时提到 min_vx；|wz|>=wz_stop 视为转弯，wz 提到 min_wz 且 vx 至少 turn_min_vx。
+    # 2026-09-22 演示前回退到 0.3：0.5 会让任何非零前进指令都变成 0.5 m/s，
+    # 目标点附近无法慢速接近，贴近障碍时也没有微调余地。
+    min_vx: 0.3
+    min_wz: 0.6
+    turn_min_vx: 0.2
+    vx_stop: 0.05
+    wz_stop: 0.15
+
+g1_sport_to_odom:
+  ros__parameters:
+    input_topic: /odommodestate
+    output_topic: /odom
+    odom_frame: odom
+    base_frame: base_link
+    stale_timeout: 0.5
+    # Provisional variances, not Unitree-reported/calibrated uncertainty.
+    pose_covariance_diagonal: [0.1, 0.1, 1000000.0, 1000000.0, 1000000.0, 0.1]
+    twist_covariance_diagonal: [0.1, 0.1, 1000000.0, 1000000.0, 1000000.0, 0.1]
+
+g1_battery_state_bridge:
+  ros__parameters:
+    input_topic: /lf/bmsstate
+    output_topic: /battery_state
+    location: G1 battery

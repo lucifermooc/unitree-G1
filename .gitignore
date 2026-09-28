@@ -6,3 +6,4 @@ dist/
 *.bag
 *.db3
 __pycache__/
+*.nopush

@@ -1,0 +1,24 @@
+# MID360 /livox/lidar（CustomMsg）-> /livox/points（PointCloud2）的剔除参数。
+# 抽点 / 高度 与 lightning-lm/config/default_livox.yaml 的 LIO 预处理一致；改那边时同步这里。
+# 盲区与 Nav2 去机身回波的距离一致（aid_navigation2 g1_navigation_direct.launch.py 的 MID360_MIN_RANGE，测试守着）。
+# 注意：LIO 直接订阅 /livox/lidar，不吃本节点输出。
+point_filter:
+  ros__parameters:
+    input_topic: /livox/lidar
+    output_topic: /livox/points
+    # 驱动已在雷达系输出（Rx(pi) 翻转后），这里只改 header 名，不变换坐标
+    frame_id: mid360_link
+    # fasterlio.point_filter_num
+    point_stride: 2
+    # 离雷达的距离（m）。0.25 = Nav2 的 MID360_MIN_RANGE：MID360 装在头上，每帧约 40% 的点打在机身上，
+    # 0.1~0.25 m 都是机身回波（lightning 的 fasterlio.blind 0.1 挡不住）。
+    blind: 0.25
+    # roi.height_min / height_max（雷达系 z，m）。MID360 在地面上方约 1.24 m，地面点 z≈-1.24，
+    # z_min 必须为负（2026-09-17 填成 1.1 时每帧只剩 20 点）
+    z_min: -2.0
+    z_max: 10.0
+    # MID360 tag 每组的最高保留置信度等级：0 高（正常）、1 中、2 低；3 = 该组不过滤。
+    # 1 = 剔除低置信度点。bit[5:4] 用 1 与 Fast-LIO 原版一致（只留 0/1）。
+    max_glue_level: 1       # bit[1:0] 相邻物体间粘连点
+    max_particle_level: 1   # bit[3:2] 雨/雾/灰尘
+    max_other_level: 1      # bit[5:4] 其他

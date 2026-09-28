@@ -1,0 +1,5 @@
+uint32 id
+string data_type
+---
+bool success
+string message

@@ -1,0 +1,4 @@
+string launch_file
+---
+bool success
+string message
