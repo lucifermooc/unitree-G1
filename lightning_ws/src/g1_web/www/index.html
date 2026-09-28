@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>G1 控制台</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header id="topbar">
+  <strong class="brand">G1 控制台</strong>
+  <form id="connForm" class="conn">
+    <label for="host" class="sr">机器人地址</label>
+    <input id="host" placeholder="机器人 IP，例如 192.168.128.146" autocomplete="off">
+    <button id="btnConnect" type="submit">连接</button>
+  </form>
+  <div class="status">
+    <span class="pill" id="stConn"><i class="dot"></i><span>未连接</span></span>
+    <span class="pill" title="电量">🔋 <span id="stBattery">--</span></span>
+    <span class="pill" title="SLAM 状态 + 控制模式">模式 <span id="stMode">--</span></span>
+    <span class="pill" title="/task_status">任务 <span id="stTask">--</span></span>
+    <span class="pill" title="当前地图">地图 <span id="stMap">--</span></span>
+  </div>
+</header>
+
+<main>
+  <section id="mapArea">
+    <canvas id="map"></canvas>
+    <div id="mapHint" class="overlay hint"></div>
+    <div id="mapCoord" class="overlay coord"></div>
+    <div class="overlay zoom">
+      <button id="btnFit" title="适应窗口">⤢</button>
+      <button id="btnCenterRobot" title="居中到机器人">◎</button>
+    </div>
+    <div id="mapEmpty" class="empty">还没有地图。到"建图"里新建一张，或者到"地图"里选一张使用。</div>
+  </section>
+
+  <aside id="panel">
+    <nav id="tabs" role="tablist">
+      <button data-tab="maps" class="active">地图</button>
+      <button data-tab="mapping">建图</button>
+      <button data-tab="points">点位与语义</button>
+      <button data-tab="nav">导航巡逻</button>
+      <button data-tab="edit">地图编辑</button>
+      <button data-tab="mode">模式</button>
+    </nav>
+
+    <!-- 地图管理 -->
+    <section class="tab" id="tab-maps">
+      <div class="row between"><h2>地图列表</h2><button id="btnMapsRefresh">刷新</button></div>
+      <p class="note">"使用"会把它设为当前地图并切换到定位模式（/set_current_map_id → /mode_set localization）。</p>
+      <ul id="mapList" class="list"></ul>
+    </section>
+
+    <!-- 建图 -->
+    <section class="tab" id="tab-mapping" hidden>
+      <h2>建图</h2>
+      <p class="note">开始后机器人进入建图模式，地图会实时显示在左边（/map_base64）。</p>
+      <div class="row">
+        <button id="btnMapStart" class="primary">开始建图</button>
+        <button id="btnMapCancel">取消建图（不保存）</button>
+      </div>
+      <label for="mapName">地图名称</label>
+      <div class="row">
+        <input id="mapName" placeholder="例如：一楼办公室">
+        <button id="btnMapSave" class="primary">保存地图</button>
+      </div>
+      <p id="mappingInfo" class="note"></p>
+    </section>
+
+    <!-- 点位与语义 -->
+    <section class="tab" id="tab-points" hidden>
+      <h2>点位</h2>
+      <p class="note">在地图空地上<b>按住鼠标、朝机器人到达后要面对的方向拖一下再松开</b>新建点位；点选圆点可编辑，拖动圆点可移动。</p>
+      <div class="row"><button id="btnPointHere">在机器人当前位置新建</button></div>
+      <form id="pointForm" hidden>
+        <h3 id="pointFormTitle">新点位</h3>
+        <label for="pName">名称</label>
+        <input id="pName" placeholder="例如：茶水间" required>
+        <label for="pDesc">描述（语义搜索用，写成人会怎么说）</label>
+        <textarea id="pDesc" rows="2" placeholder="例如：有饮水机和咖啡机，可以接水、喝水、泡茶"></textarea>
+        <div class="grid3">
+          <div><label for="pX">x（米）</label><input id="pX" type="number" step="0.01"></div>
+          <div><label for="pY">y（米）</label><input id="pY" type="number" step="0.01"></div>
+          <div><label for="pYaw">朝向（度）</label><input id="pYaw" type="number" step="1"></div>
+        </div>
+        <p id="pWarn" class="warn"></p>
+        <div class="row wrap">
+          <button id="btnPointSave" type="submit" class="primary">保存</button>
+          <button id="btnPointGo" type="button">导航到这里</button>
+          <button id="btnPointDelete" type="button" class="danger">删除</button>
+          <button id="btnPointCancel" type="button">取消</button>
+        </div>
+      </form>
+      <ul id="pointList" class="list compact"></ul>
+
+      <h2>语义地图</h2>
+      <p class="note">说一句话，找到最相关的点位（名称 + 描述）。点位改动后会自动重建。</p>
+      <div class="row">
+        <input id="semQuery" placeholder="例如：我想喝水">
+        <button id="btnSemSearch">搜索</button>
+        <button id="btnSemGo" class="primary">去那里</button>
+      </div>
+      <div id="semResult" class="result"></div>
+      <div class="row"><button id="btnSemRebuild" class="subtle">手动重建语义库</button></div>
+    </section>
+
+    <!-- 导航巡逻 -->
+    <section class="tab" id="tab-nav" hidden>
+      <h2>任务控制</h2>
+      <p class="note">当前任务：<b id="navTask">--</b></p>
+      <div class="row">
+        <button id="btnPause">暂停</button>
+        <button id="btnResume">继续</button>
+        <button id="btnCancel" class="danger">取消</button>
+      </div>
+      <h2>单点导航</h2>
+      <div class="row">
+        <label for="navPoint" class="sr">目标点位</label>
+        <select id="navPoint"></select>
+        <button id="btnNavGo" class="primary">导航</button>
+      </div>
+      <h2>巡逻</h2>
+      <p class="note">按勾选顺序依次经过，走完一圈回到第一个点继续（/patrol_path）。</p>
+      <ul id="patrolList" class="list compact"></ul>
+      <div class="row"><button id="btnPatrolStart" class="primary">开始巡逻</button></div>
+      <p class="note">接口文档里的巡逻圈数/时长（patrol_count / patrol_duration）目前后端的 PatrolControl.srv 没有这两个字段，暂不提供。</p>
+    </section>
+
+    <!-- 地图编辑 -->
+    <section class="tab" id="tab-edit" hidden>
+      <h2>禁行线</h2>
+      <p class="note">点"画禁行线"后，在地图上依次点起点和终点。</p>
+      <div class="row">
+        <button id="btnNogoDraw">画禁行线</button>
+        <button id="btnNogoSave" class="primary">保存禁行线</button>
+      </div>
+      <ul id="nogoList" class="list compact"></ul>
+      <h2>橡皮擦</h2>
+      <p class="note">点"橡皮擦"后在地图上点击或拖动涂抹，然后"应用"写回地图文件（/map_editor）。</p>
+      <div class="row">
+        <button id="btnEraser">橡皮擦</button>
+        <label for="eraserSize" class="sr">大小</label>
+        <select id="eraserSize">
+          <option value="0.2">0.2 米</option>
+          <option value="0.5" selected>0.5 米</option>
+          <option value="1.0">1.0 米</option>
+        </select>
+        <label for="eraserGray" class="sr">涂成</label>
+        <select id="eraserGray">
+          <option value="0" selected>擦成空地</option>
+          <option value="100">画成障碍</option>
+        </select>
+      </div>
+      <div class="row">
+        <button id="btnEraserApply" class="primary">应用橡皮擦</button>
+        <button id="btnEraserClear">清除涂抹</button>
+      </div>
+    </section>
+
+    <!-- 模式 -->
+    <section class="tab" id="tab-mode" hidden>
+      <h2>模式设置（/mode_set）</h2>
+      <div class="modes">
+        <button data-mode="mapping">建图<small>mapping</small></button>
+        <button data-mode="localization">定位<small>localization</small></button>
+        <button data-mode="patrol">导航/巡逻<small>patrol</small></button>
+        <button data-mode="remote_control">遥控<small>remote_control</small></button>
+        <button data-mode="idle">空闲<small>idle</small></button>
+      </div>
+      <h2>重定位</h2>
+      <p class="warn">机器人端暂未实现重定位（接口文档 1.1 标注"暂无"），这里只发出消息，仅仿真可用。</p>
+      <div class="row">
+        <button id="btnRelocate">在地图上拖动设置位姿</button>
+        <button id="btnRelocateZero">回到原点</button>
+      </div>
+    </section>
+
+    <details id="logBox" open>
+      <summary>操作记录</summary>
+      <ol id="log"></ol>
+    </details>
+  </aside>
+</main>
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script src="vendor/roslib.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,5 @@
+uint32 map_id
+string data_type
+---
+bool success
+string message

@@ -1,0 +1,69 @@
+<?xml version="1.0"?>
+<robot name="g1_navigation_sensors">
+
+  <!--
+    body_link：传感器所在刚体（躯干/头部）。原点为站直时机器人旋转中心在地面上的投影，
+    z 轴沿躯干向上。mid360 / d435 相对它的外参固定（Unitree 官方安装参数）。
+
+    base_link / base_footprint 是平面导航系，不在本 URDF 中：
+    由定位（LocSystem）发布 map->base_link（只含 x/y/z 与航向，始终贴合地图平面）、
+    base_link->body_link（躯干实时倾斜，动态）以及 base_link->base_footprint（恒等）。
+    人形机器人站姿不同，头部相对重力的角度会变化数度，静态外参无法保证 base_link 水平；
+    动态倾斜放在 base_link->body_link 中，map->mid360_link 仍是真实位姿，传感器投影不受影响。
+  -->
+  <link name="body_link"/>
+
+  <!-- MID360 -->
+  <link name="mid360_link"/>
+
+  <joint name="body_to_mid360_joint" type="fixed">
+    <parent link="body_link"/>
+    <child link="mid360_link"/>
+
+    <!--
+      mid360_link 是驱动输出系（G1_MID360s_config.json 已绕 x 翻转 roll=181.19, pitch=-0.55，
+      点云与 IMU 同步旋转）。pitch=+2.3°：Unitree 官方倒装原始系下为 -2.3°，翻转后绕 y 的角度变号。
+      与 d435 外参同为官方/原始标定，二者相对关系保持不变。
+      站姿导致的躯干倾斜（实测 2026-09-18 两次站立相差约 3.5°）由 base_link->body_link 动态表达，
+      不要再把某一次站姿的实测倾斜写进这里（会同时改变 d435 相对雷达的外参）。
+    -->
+    <origin
+      xyz="0.0002835 0.00003 1.23618"
+      rpy="0 0.04014257279586953 0"/>
+  </joint>
+
+  <!-- d435 -->
+  <link name="d435_link"/>
+
+  <joint name="body_to_d435_joint" type="fixed">
+    <parent link="body_link"/>
+    <child link="d435_link"/>
+    <origin xyz="0.0576235 0.01753 1.24987" rpy="0 0.8307767239493009 0"/>
+  </joint>
+
+  <!--
+    realsense2_camera with camera_name:=camera publishes its internal TF tree
+    below camera_link.  d435_link is the calibrated mounting frame and is
+    intentionally coincident with the driver's camera_link.
+  -->
+  <link name="camera_link"/>
+
+  <joint name="d435_to_camera_link_joint" type="fixed">
+    <parent link="d435_link"/>
+    <child link="camera_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <!-- MID360 internal IMU -->
+  <link name="mid360_imu"/>
+
+  <joint name="mid360_to_imu_joint" type="fixed">
+    <parent link="mid360_link"/>
+    <child link="mid360_imu"/>
+
+    <origin
+      xyz="0.011 0.02329 -0.04412"
+      rpy="0 0 0"/>
+  </joint>
+
+</robot>

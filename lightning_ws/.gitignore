@@ -1,0 +1,9 @@
+build/
+install/
+log/
+node_modules/
+dist/
+*.bag
+*.db3
+__pycache__/
+*.nopush

@@ -1,0 +1,48 @@
+# D435 标记点云过滤（g1_nav_bridge/d435_mark_filter），喂两张图 STVL 的 realsense_mark / realsense_mark_tall；
+# 清除仍吃原始点云。由 aid_navigation2 g1_navigation_direct.launch.py 加载（use_d435_mark_filter 默认 true）。
+# 2026-09-24 move_0924 离线（点云反投影回深度图，与 image_rect_raw 逐像素一致）：base_link 0.5 m 内的标记
+# 109 → 37（剩下的全是一致邻居 3~4 个的连续表面，不是飞点），真实物体 2D 格召回 0.5~1 / 1~1.5 / 1.5~2.5 m
+# = 100% / 97% / 100%。帧间一致性再加上去，召回掉到 ~50%，所以关掉。
+# 每级一个开关，A/B 时一次只改一个（回放台：replay_costmap.sh --mark filt15 --filter-set k=v）。
+d435_mark_filter:
+  ros__parameters:
+    depth_topic: /camera/camera/depth/image_rect_raw
+    info_topic: /camera/camera/depth/camera_info
+    output_topic: /camera/camera/depth/mark_points
+    base_frame: base_link
+    # 1. 量程（max 与驱动 clip_distance 3.0 一致）。min 0.40：镜头前 0.2~0.3 m、base_link 旁 ~0.2 m 的小团点
+    #    （4~6 点，团内像素有 3~4 个一致邻居，4 邻域删不掉；2026-09-24 实机）。0.4 m 内的东西已经贴着头，
+    #    不是导航障碍；D435 看到地面的最近距离是 1.28 m，这里不丢任何可用信息。
+    min_depth: 0.40
+    max_depth: 3.0
+    # 2. 4 邻域一致性 —— Haier Aurora 驱动原值：|Δd|<=0.08 的邻居 <3 个就删（飞点、边缘拖尾）
+    neighbor_filter: true
+    neighbor_depth_diff: 0.08
+    neighbor_min_count: 3
+    # 3. 帧间一致性 —— Haier 原值：与上一帧同像素 |Δd|>0.10 或上一帧无深度就删（逐帧闪烁）
+    #    关：飞点 4 邻域已剔干净；它额外删掉 20~30% 的真实物体 2D 格（边缘像素逐帧跳变，move_0924 离线）
+    temporal_filter: false
+    temporal_depth_diff: 0.10
+    temporal_max_dt: 0.2
+    # 5. 低带曲率去地面 —— 默认关：D435 地面 σ≈2~3cm 时与 5~8cm 矮障碍不可分（见 d435_ground_curvature.hpp）
+    ground_curvature: false
+    ground_z_min: -0.10
+    ground_z_max: 0.10
+    ground_voxel: 0.05
+    ground_k_search: 30
+    ground_curvature_threshold: 0.03
+    # 4a. 机器人自身区域：base_link 水平 < self_crop_radius 且高度在 [z_min, z_max] 的点删掉。
+    #     2026-09-24 实机（d435near_0924）：base_link 旁的 D435 致命格 41 次全部是走路时前摆的手
+    #     （x 0.25~0.43、|y| 0.08~0.30、高 0.57~0.73 m，深度一致的小块，4 邻域删不掉）。
+    #     只删这个高度带：0.45 m 以下的腿、0.85 m 以上的躯干照样标，正前方闯进 0.5 m 内的人仍会让机器人停下。
+    #     需要按扫描时刻查 base_link 的 TF；查不到时本帧不删（不断流）。
+    self_crop_radius: 0.5
+    self_crop_z_min: 0.45
+    self_crop_z_max: 0.85
+    # 6. 悬空点剔除 —— 只动离相机 >1.5m、射线下倾 <30°、高 0.15~0.65 m、从地面爬不上去的点。
+    #    2026-09-24 realsense_mark.obstacle_range 1.5 -> 2.0 后开启：实机 1.6~2.1 m 带出现深度图顶部 0~25 行的
+    #    悬空小团（高 0.35~0.65 m，下面无支撑，左右前方都有，机器人不动就一直在）= 掠射地面错深度。
+    #    代价：该带内底部没有回波的真实物体（桌面）要进 1.5 m 才标；>0.65 m 的残留不处理；单帧耗时 ~10 → ~26 ms。
+    #    开了仍有残留，已把距离退回 1.5 并关掉（1.5 内它不起作用）。
+    floating_filter: false
+    min_range: 1.5

@@ -1,0 +1,654 @@
+# G1 导航基线：map → base_link；/odom 仅提供速度反馈，不发布 odom TF。
+#
+# 本文件就是真机上的运行值：launch 不再计算或改写任何参数（2026-09-21 起）。
+# g1_navigation_direct.launch.py 只做两件事：按 use_keepout / use_realsense_obstacles
+# 删层，然后把本文件交给 navigation2.launch.py。改参数改这里，`ros2 param get` 能对上。
+#
+# 目标发行版只有 jazzy（Thor）：插件名用 `::`，bt_navigator 不写 plugin_lib_names
+# （用 jazzy 默认全集），controller_server 用复数 progress_checker_plugins。
+# 高度基准：平面模式下 map->base_link 的 z 恒为 0，地面 z=0，所以下面的障碍高度就是 map 系高度。
+# 保留原自定义禁行区层（不是官方 KeepoutFilter），及前端使用的 BT / 规划器。
+
+bt_navigator:
+  ros__parameters:
+    use_sim_time: false
+    global_frame: map
+    robot_base_frame: base_link
+    odom_topic: /odom
+    bt_loop_duration: 100
+    default_server_timeout: 200
+    wait_for_service_timeout: 1000
+    # 'default_nav_through_poses_bt_xml' and 'default_nav_to_pose_bt_xml' are use defaults:
+    # nav2_bt_navigator/navigate_to_pose_w_replanning_and_recovery.xml
+    # nav2_bt_navigator/navigate_through_poses_w_replanning_and_recovery.xml
+    # They can be set here or via a RewrittenYaml remap from a parent launch file to Nav2.
+    # default_nav_through_poses_bt_xml: $(find-pkg-share aid_navigation2)/behavior_trees/navigate_through_poses_w_replanning_and_recovery.xml
+    default_nav_to_pose_bt_xml: $(find-pkg-share aid_navigation2)/behavior_trees/navigate_w_recovery_and_replanning_only_if_path_becomes_invalid.xml
+    # plugin_lib_names 不再显式列出：jazzy 默认已包含本工程 BT 用到的全部节点
+    # （RecoveryNode / RateController / IsPathValid / ClearEntireCostmap / RoundRobin ...），
+    # 而旧列表里的若干 humble 库名在 jazzy 不存在，写上会让 bt_navigator 加载失败。
+
+controller_server:
+  ros__parameters:
+    use_sim_time: false
+    odom_topic: /odom
+    enable_stamped_cmd_vel: false
+    controller_frequency: 10.0
+    # MPPI 偶发一次 "Optimizer fail to compute path" 不立即 abort，避免
+    # 失败→清图→重规划→再失败的死循环（与旧系统一致）。
+    failure_tolerance: 0.3
+    min_x_velocity_threshold: 0.001
+    min_y_velocity_threshold: 0.001
+    min_theta_velocity_threshold: 0.001
+    controller_plugins: ["FollowPath"]
+    progress_checker_plugins: ["progress_checker"]   # jazzy 形式（humble 是单数 progress_checker_plugin）
+    goal_checker_plugins: ["goal_checker"]
+    progress_checker:
+      plugin: "nav2_controller::SimpleProgressChecker"
+      required_movement_radius: 0.10
+      movement_time_allowance: 15.0
+    goal_checker:
+      plugin: "nav2_controller::SimpleGoalChecker"
+      xy_goal_tolerance: 0.20
+      yaw_goal_tolerance: 0.20
+      stateful: true
+    FollowPath:
+      plugin: "nav2_mppi_controller::MPPIController"
+      time_steps: 40
+      model_dt: 0.10
+      batch_size: 2000
+      iteration_count: 1
+      prune_distance: 1.7
+      transform_tolerance: 0.1
+      temperature: 0.5
+      gamma: 0.015
+      motion_model: "DiffDrive"
+      visualize: false
+      reset_period: 1.0
+      regenerate_noises: false
+      retry_attempt_limit: 1
+      max_robot_pose_search_dist: 2.5
+      enforce_path_inversion: true
+
+      # 【硬性安全约束，不得放宽】G1 收到负的 vx 会摔倒，vx_min 必须恒为 0.0。
+      # 不要为了"被困时能脱困"把它改成负值——脱困只能靠 BT 的 Spin/BackUp 行为，
+      # 且 BackUp 行为同样会下发负速度，在本机上也必须禁用或改用原地转向替代。
+      # 2026-09-22 演示前降速：0.7 的制动距离与转向漂移都偏大。
+      vx_max: 0.45
+      vx_min: 0.0
+      vy_max: 0.0
+      wz_max: 0.9
+      vx_std: 0.3
+      vy_std: 0.0
+      wz_std: 0.3
+
+      TrajectoryVisualizer:
+        trajectory_step: 10
+        time_step: 6
+
+      critics: ["ConstraintCritic", "CostCritic", "GoalCritic", "GoalAngleCritic",
+                "PathAlignCritic", "PathFollowCritic", "PathAngleCritic",
+                "PreferForwardCritic", "ObstaclesCritic"]
+
+      ConstraintCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 4.0
+
+      CostCritic:
+        enabled: true
+        cost_power: 1
+        # 2026-09-21 起与 ObstaclesCritic 搭配（对齐旧系统 3.8 / 180）：
+        # CostCritic 只按中心点代价做温和惩罚，真正的排斥力和碰撞裕量交给 ObstaclesCritic。
+        # 之前 8.0 是"只有这一路在管避障"时的补偿值，两个 critic 都开时会过度惩罚、窄道寸步难行。
+        # consider_footprint 保持 false：圆形足迹下中心点代价配合内切膨胀已等价于足迹检查。
+        cost_weight: 3.8
+        critical_cost: 180.0
+        consider_footprint: false
+        collision_cost: 1000000.0
+        near_goal_distance: 1.0
+        inflation_layer_name: ""
+
+      GoalCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 20.0
+        threshold_to_consider: 1.4
+
+      GoalAngleCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 10.0
+        threshold_to_consider: 0.5
+
+      PreferForwardCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 50.0
+        threshold_to_consider: 0.5
+
+      ObstaclesCritic:
+        # 2026-09-21 启用（对齐旧系统）：它在采样阶段就按排斥力淘汰靠近障碍的轨迹，
+        # 让机器人提前左右绕，而不是硬闯到 253 才由 CostCritic 判失败。
+        enabled: true
+        cost_power: 1
+        # 2026-09-21 监控 322 个采样：控制器看到的最近障碍中位 0.45 m，19.9% 的采样 <0.40 m，
+        # 3.1% 的采样中心格代价 >=253（注意：这是"控制器感知到的代价"，不等于物理已碰撞，
+        # 监控脚本当时未做 costmap 与位姿的时间对齐，该比例可能被时序错位放大）。
+        # robot_radius 受盲区限制不能超过 0.40，膨胀又不能加宽（会吃掉白色区域），
+        # 所以余量加在 MPPI 打分侧。
+        # collision_margin_distance 是**软惩罚**，不是硬安全圈：nav2 的 ObstaclesCritic 只做
+        #   if (dist < margin) cost += (margin - dist)，再乘 critical_weight，不标记为碰撞。
+        # 所以 0.35+0.20 是"开始受强惩罚的范围"，不保证 0.55 m 内必停；其他 critic 权重更大时
+        # MPPI 仍可能接受进入。官方建议区间 0.05~0.20。障碍没进 costmap（D435 盲区）时本项无效。
+        # 本轮只改这一个变量：repulsion_weight / CostCritic.cost_weight 保持原值，
+        # 三项同时跳变无法归因，且两套障碍 critic 一起加重容易在窄道互相打架。
+        repulsion_weight: 1.5
+        critical_weight: 18.0
+        consider_footprint: false
+        collision_cost: 100000.0
+        collision_margin_distance: 0.20
+        near_goal_distance: 0.5
+        # 下面两个必须与 local_costmap 的 inflation_layer 完全一致，否则本 critic 复算的
+        # 代价与地图不符，避障行为会莫名其妙。
+        inflation_radius: 0.75
+        cost_scaling_factor: 8.0
+
+      PathAlignCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 10.0
+        max_path_occupancy_ratio: 0.05
+        trajectory_point_step: 4
+        threshold_to_consider: 0.5
+        offset_from_furthest: 20
+        use_path_orientations: false
+
+      PathFollowCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        offset_from_furthest: 5
+        threshold_to_consider: 1.4
+
+      PathAngleCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        offset_from_furthest: 4
+        threshold_to_consider: 0.5
+        max_angle_to_furthest: 1.0
+        forward_preference: true
+
+map_server:
+  ros__parameters:
+    use_sim_time: false
+    # Overridden in launch by the "map" launch configuration or provided default value.
+    # To use in yaml, remove the default "map" value in the tb3_simulation_launch.py file & provide full path to map below.
+    yaml_filename: ""
+
+costmap_filter_info_server:
+  ros__parameters:
+    use_sim_time: false
+    type: 0
+    filter_info_topic: "/costmap_filter_info"
+    mask_topic: "/keepout_filter_map"
+    base: 0.0
+    multiplier: 1.0
+
+planner_server:
+  ros__parameters:
+    planner_plugins: ["GridBased"]
+
+    GridBased:
+      plugin: "nav2_smac_planner::SmacPlanner2D"   # jazzy 形式；Iron 及更早用 "/"
+      tolerance: 0.125                      # tolerance for planning if unable to reach exact pose, in meters
+      downsample_costmap: false             # whether or not to downsample the map
+      downsampling_factor: 1                # multiplier for the resolution of the costmap layer (e.g. 2 on a 5cm costmap would be 10cm)
+      allow_unknown: false                  # allow traveling in unknown space
+      max_iterations: 1000000               # maximum total iterations to search for before failing (in case unreachable), set to -1 to disable
+      max_on_approach_iterations: 1000      # maximum number of iterations to attempt to reach goal once in tolerance
+      max_planning_time: 2.0                # max time in s for planner to plan, smooth
+      cost_travel_multiplier: 2.0           # Cost multiplier to apply to search to steer away from high cost areas. Larger values will place in the center of aisles more exactly (if non-`FREE` cost potential field exists) but take slightly longer to compute. To optimize for speed, a value of 1.0 is reasonable. A reasonable tradeoff value is 2.0. A value of 0.0 effective disables steering away from obstacles and acts like a naive binary search A*.
+      use_final_approach_orientation: false # Whether to set the final path pose at the goal's orientation to the requested orientation (false) or in line with the approach angle so the robot doesn't rotate to heading (true)
+      smoother:
+        max_iterations: 1000
+        w_smooth: 0.3
+        w_data: 0.2
+        tolerance: 1.0e-10
+
+smoother_server:
+  ros__parameters:
+    costmap_topic: global_costmap/costmap_raw
+    footprint_topic: global_costmap/published_footprint
+    robot_base_frame: base_link
+    transform_tolerance: 0.1
+    smoother_plugins: ["simple_smoother"]
+    simple_smoother:
+      plugin: "nav2_smoother::SimpleSmoother"
+      tolerance: 1.0e-10
+      do_refinement: true
+      refinement_num: 2
+      max_its: 1000
+      w_data: 0.2
+      w_smooth: 0.3
+      enforce_path_inversion: true
+
+behavior_server:
+  ros__parameters:
+    costmap_topic: local_costmap/costmap_raw
+    footprint_topic: local_costmap/published_footprint
+    cycle_frequency: 10.0
+    behavior_plugins: ["spin", "backup", "drive_on_heading", "assisted_teleop", "wait"]
+    spin:
+      plugin: "nav2_behaviors::Spin"
+    backup:
+      plugin: "nav2_behaviors::BackUp"
+    drive_on_heading:
+      plugin: "nav2_behaviors::DriveOnHeading"
+    wait:
+      plugin: "nav2_behaviors::Wait"
+    assisted_teleop:
+      plugin: "nav2_behaviors::AssistedTeleop"
+    local_frame: map
+    global_frame: map
+    enable_stamped_cmd_vel: false
+    robot_base_frame: base_link
+    transform_tolerance: 0.1
+    use_sim_time: false
+    simulate_ahead_time: 2.0
+    max_rotational_vel: 0.9
+    min_rotational_vel: 0.8
+    rotational_acc_lim: 0.60
+
+velocity_smoother:
+  ros__parameters:
+    use_sim_time: false
+    smoothing_frequency: 10.0
+    scale_velocities: false
+    feedback: "OPEN_LOOP"
+    # X 下限为 0，硬性禁止后退；角速度保留正负方向。
+    max_velocity: [0.45, 0.0, 0.9]
+    min_velocity: [0.0, 0.0, -0.9]
+    max_accel: [0.35, 0.35, 0.60]
+    # 2026-09-21 vx_max 提到 0.7 后必须同步加大减速度：
+    # 原 -0.35 m/s² 从 0.7 停住要 2.0 s / 走 0.70 m，而传感器正前 0.40 m 是盲区。
+    # -0.8 m/s² 把制动距离压到 0.31 m，与盲区同量级。
+    max_decel: [-0.8, -0.35, -0.60]
+    enable_stamped_cmd_vel: false
+    # 不置零：G1 最小有效速度由 g1_cmdvel_to_sport 按方向提升（min_vx/min_wz）。
+    deadband_velocity: [0.0, 0.0, 0.0]
+    velocity_timeout: 0.20
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      use_sim_time: false
+      global_frame: map
+      robot_base_frame: base_link
+      # 与 10 Hz 控制循环同步更新；5 Hz 发布已足够 RViz/前端显示。
+      update_frequency: 10.0
+      publish_frequency: 5.0
+      transform_tolerance: 0.20
+      resolution: 0.05
+      # 物理包络：2026-09-21 卷尺实测 base_link 到机身最前方 0.10 m，机身前后 0.20 m；
+      # 2026-09-22：自清关闭并验证解耦后（tools/nav2_debug/footprint_clearing_sweep.py），
+      # 加大半径不再抹除真实障碍，于是用它覆盖 D435 的几何盲区。
+      # 盲区随障碍高度变（箱顶 0.57 m 最近可见 0.30 m；0.42~0.54 m 最近可见 0.55 m），
+      # 实测物理接触时 costmap 读数约 0.56 m，故取 0.55 才能在接触前停住。
+      # 代价：253 不可通行带 0.55 m 厚，通道净宽需 >1.1 m。窄场地回退 0.40。不要再把它当安全距离用——
+      # robot_radius 同时是 STVL 的 footprint 自清半径，
+      # 设大了会把该半径内的真实障碍当成自身点云抹掉（D435 障碍只有 STVL 一个源，抹掉即消失）。
+      # 安全余量一律由 inflation_radius 承担，它只染代价、不清除任何东西。
+      # 另：D435+mid360 在 base_link 正前 0~0.40 m 无任何点（盲区），
+      # 只要本值 <= 0.40，自清区完全落在盲区内，就不可能吃掉真实障碍。
+      robot_radius: 0.50
+      footprint_padding: 0.0
+      rolling_window: true
+      width: 6
+      height: 6
+      plugins: ["keepout_layer", "stvl_voxel_layer", "mid360_voxel_layer", "inflation_layer"]
+      stvl_voxel_layer:
+        plugin: "spatio_temporal_voxel_layer/SpatioTemporalVoxelLayer"
+        enabled: true
+        # 盲区/视野外记忆上限。3.0 时人走后残影顶在 3 s；1.5 封在 ~1.6 s，真障碍格只掉 2~5%。别再往下调：近场要靠它跨过 D435 盲区（0.3~0.5 m）。
+        voxel_decay: 1.5
+        decay_model: 0
+        voxel_size: 0.05
+        track_unknown_space: true
+        mark_threshold: 0
+        # 必须关：自清半径 = robot_radius，会把半径内的真实障碍当自身点抹掉。
+        # 不在 STVL 动态参数回调里，改了必须重启整套栈。
+        update_footprint_enabled: false
+        combination_method: 1
+        origin_z: 0.0
+        publish_voxel_map: false
+        transform_tolerance: 0.20
+        mapping_mode: false
+        map_save_duration: 60.0
+        observation_sources: realsense_mark realsense_mark_tall realsense_clear
+        # D435：标记/清除分源。realsense_mark 标离相机 1.5 m 内、≥0.15 m。距离是离相机的 3D 距离，相机高 1.24 m，
+        # 地上矮障碍水平只标到 base_link 前 ~1.1 m。2026-09-24 实机试过 2.0：1.5 m 外的矮障碍能标，但深度图顶部几行
+        # 掠射地面的错深度在 1.6~2.1 m 带反复出现（悬空 0.35~0.65 m）；开悬空点剔除后仍有残留，效果不好，退回 1.5。
+        # 两个标记源都吃 g1_nav_bridge/d435_mark_filter 的输出：4 邻域一致性剔除孤立飞点（镜头前 ~0.2 m、高 ~1.0 m，
+        # 在清除视锥外，贴着 base_link 挂满 voxel_decay）。use_d435_mark_filter:=false 时 launch 改回原始点云。
+        realsense_mark:
+          data_type: PointCloud2
+          topic: /camera/camera/depth/mark_points
+          transport_type: raw
+          marking: true
+          clearing: false
+          obstacle_range: 1.5
+          # 0.15。2026-09-24 实机试过 0.05（为了标 7~8 cm 的矮障碍），用户决定退回：D435 点云地面实测偏低 ~4.5 cm
+          # 且随站姿变，低门槛靠不住。
+          min_obstacle_height: 0.15
+          max_obstacle_height: 1.8
+          expected_update_rate: 0.0
+          observation_persistence: 0.0
+          inf_is_valid: false
+          filter: voxel
+          voxel_min_points: 4
+          clear_after_reading: true
+        # 高物体（人、桌面）：0.7~1.8 m、离相机 2.5 m 内；0.7 m 下限高于错深度簇。
+        realsense_mark_tall:
+          data_type: PointCloud2
+          topic: /camera/camera/depth/mark_points
+          transport_type: raw
+          marking: true
+          clearing: false
+          obstacle_range: 2.5
+          min_obstacle_height: 0.70
+          max_obstacle_height: 1.8
+          expected_update_rate: 0.0
+          observation_persistence: 0.0
+          inf_is_valid: false
+          filter: voxel
+          voxel_min_points: 4
+          clear_after_reading: true
+        # 深度相机视锥（model_type 0，max_z 沿光轴）。视锥内没再被标记的体素（人走后的格子）按 decay_acceleration
+        # 加速消失，只作用于本层。15.0 = STVL 官方示例值。
+        realsense_clear:
+          data_type: PointCloud2
+          topic: /camera/camera/depth/color/points
+          transport_type: raw
+          marking: false
+          clearing: true
+          max_z: 3.5
+          min_z: 0.20
+          min_obstacle_height: 0.05
+          max_obstacle_height: 1.8
+          vertical_fov_angle: 1.012
+          vertical_fov_padding: 0.05
+          horizontal_fov_angle: 1.518
+          decay_acceleration: 15.0
+          model_type: 0
+          filter: voxel
+          voxel_min_points: 2
+      # 2026-09-24 MID360 从 2D obstacle_layer 迁到 3D STVL（参照 Haier 3D 雷达：标记源 + 3D 雷达视锥清除源）。
+      # 2D 射线清除的问题：MID360 前方 ±30° 被头挡住，射线到不了，人走后的格子永远清不掉。
+      # STVL 按体素"最后一次被标记的时间"衰减，视锥内没再被标记的加速衰减，与射线能否到达无关。
+      # 单独一层是为了 footprint 自清：STVL 的自清开关是整层的。MID360 要像原 obstacle_layer
+      # （footprint_clearing_enabled: true）一样抹掉 robot_radius 内的格——demo2 回放里贴着家具走时，右侧
+      # 0.4~0.5 m 的家具进了内切带，MPPI 会判当前位姿已碰撞；D435 层必须不自清（正前方靠它在接触前停住）。
+      # 代价：两层互不清除。MID360 在前方盲区标的格只靠本层衰减 + 3D 雷达视锥清，不再借 D435 视锥。
+      mid360_voxel_layer:
+        plugin: "spatio_temporal_voxel_layer/SpatioTemporalVoxelLayer"
+        enabled: true
+        # 视野外记忆上限，与 D435 层一致。
+        voxel_decay: 1.5
+        decay_model: 0
+        voxel_size: 0.05
+        track_unknown_space: true
+        mark_threshold: 0
+        # 自清半径 = robot_radius。不在 STVL 动态参数回调里，改了必须重启整套栈。
+        update_footprint_enabled: true
+        combination_method: 1
+        origin_z: 0.0
+        publish_voxel_map: false
+        transform_tolerance: 0.20
+        mapping_mode: false
+        map_save_duration: 60.0
+        observation_sources: livox_mark livox_clear
+        # MID360：LIO 去畸变单帧（雷达系 + 扫描时刻），经 g1_nav_bridge/scan_range_filter 剔除离雷达 0.25 m 内的
+        # 机身回波（STVL 没有 obstacle_min_range，不剔除会在脚下标出致命格）。不要换成原始 /livox/points（未去畸变）。
+        livox_mark:
+          data_type: PointCloud2
+          topic: /lightning/registered_scan_nav
+          transport_type: raw
+          marking: true
+          clearing: false
+          # 离雷达的 3D 距离；步态摆动把远点甩得最狠（4 m 处 ±8° ≈ 56 cm），只标 2.5 m 内
+          obstacle_range: 2.5
+          # map 系高度，地面 z=0。0.15（原 0.10，与 D435 realsense_mark 一致）：2026-09-24 实机 global 层的单格
+          # 噪点（1~3 格、31 帧里只被 1~14 帧打到）支撑点全在 0.10~0.13 m，是刚越过 0.10 的地面回波
+          min_obstacle_height: 0.15
+          max_obstacle_height: 1.8
+          expected_update_rate: 0.0
+          # 雷达 10 Hz、本层 10 Hz：留 0.2 s，两次更新间来两帧时不丢帧
+          observation_persistence: 0.2
+          inf_is_valid: false
+          filter: voxel
+          voxel_min_points: 0
+          clear_after_reading: true
+        # 3D 雷达视锥（model_type 1）：水平 360°；垂直视锥只能关于雷达水平面对称，雷达系实测仰角 −50.5°~+6.4°
+        # （mid360_stvl_probe.py 的 p0.5/p99.5），取 ±51.6°（上半部分雷达看不到，那里的体素只是衰减快一点）。
+        # min_z/max_z 是水平半径，padding 单位是米。非重复扫描同一格重访间隔 p95 1.0 s、p99 2.4~2.8 s，
+        # 加速度取小（Haier 3D 雷达同为 1.0）：视锥内没再被打到的体素 local 活 1.21 s、global（decay 5）活 2.47 s。
+        livox_clear:
+          data_type: PointCloud2
+          topic: /lightning/registered_scan_nav
+          transport_type: raw
+          marking: false
+          clearing: true
+          model_type: 1
+          horizontal_fov_angle: 6.2832
+          vertical_fov_angle: 1.80
+          vertical_fov_padding: 0.05
+          min_z: 0.25
+          max_z: 3.0
+          min_obstacle_height: 0.10
+          max_obstacle_height: 1.8
+          decay_acceleration: 1.0
+          filter: voxel
+      keepout_layer:
+        plugin: "aid_costmap_plugin/KeepoutLayer"
+        enabled: true
+        filter_info_topic: /costmap_filter_info
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        # inflation_radius 只决定代价梯度染多远，不产生不可通行格；碰撞阈值由 robot_radius 定。
+        # 2026-09-21 对齐旧系统（0.50 / 8.0）：原 0.85/2.0 把障碍外 0.85 m 全染成中高代价，
+        # 0.50 m 处仍有 169，RViz 上几乎没有白色，MPPI 的代价地形也被抹平。
+        # 现在 cost(d)=252·exp(-8·(d-0.30))：0.45→76、0.55→34、0.65→15，0.5 m 外迅速回到白色，
+        # “只走白色”才成为可执行判据。代价是 0.30~0.45 m 的排斥力更陡，窄道通过更果断。
+        # 改动此处必须同步 MPPI 的 ObstaclesCritic.inflation_radius / cost_scaling_factor。
+        cost_scaling_factor: 8.0
+        # 随 robot_radius 同步：始终保持 inflation_radius = robot_radius + 0.20，
+        # 梯度带宽 0.20 m、边界代价 51，避免出现代价从 76 直接掉 0 的台阶。
+        inflation_radius: 0.75
+      always_send_full_costmap: true
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      use_sim_time: false
+      global_frame: map
+      robot_base_frame: base_link
+      update_frequency: 5.0
+      publish_frequency: 5.0
+      transform_tolerance: 0.20
+      resolution: 0.05
+      # 物理包络：2026-09-21 卷尺实测 base_link 到机身最前方 0.10 m，机身前后 0.20 m；
+      # 2026-09-22：自清关闭并验证解耦后（tools/nav2_debug/footprint_clearing_sweep.py），
+      # 加大半径不再抹除真实障碍，于是用它覆盖 D435 的几何盲区。
+      # 盲区随障碍高度变（箱顶 0.57 m 最近可见 0.30 m；0.42~0.54 m 最近可见 0.55 m），
+      # 实测物理接触时 costmap 读数约 0.56 m，故取 0.55 才能在接触前停住。
+      # 代价：253 不可通行带 0.55 m 厚，通道净宽需 >1.1 m。窄场地回退 0.40。不要再把它当安全距离用——
+      # robot_radius 同时是 STVL 的 footprint 自清半径，
+      # 设大了会把该半径内的真实障碍当成自身点云抹掉（D435 障碍只有 STVL 一个源，抹掉即消失）。
+      # 安全余量一律由 inflation_radius 承担，它只染代价、不清除任何东西。
+      # 另：D435+mid360 在 base_link 正前 0~0.40 m 无任何点（盲区），
+      # 只要本值 <= 0.40，自清区完全落在盲区内，就不可能吃掉真实障碍。
+      robot_radius: 0.50
+      footprint_padding: 0.0
+      track_unknown_space: true
+      unknown_cost_value: 255
+      trinary_costmap: true
+      plugins: ["static_layer", "stvl_voxel_layer", "mid360_voxel_layer", "keepout_layer", "inflation_layer"]
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_subscribe_transient_local: true
+        track_unknown_space: true
+      stvl_voxel_layer:
+        plugin: "spatio_temporal_voxel_layer/SpatioTemporalVoxelLayer"
+        enabled: true
+        # D435 看到的障碍转出视野后保留 5 s 供规划绕行；视锥内没再看到的按 realsense_clear 的加速度很快清掉。
+        voxel_decay: 5.0
+        decay_model: 0
+        voxel_size: 0.05
+        track_unknown_space: true
+        mark_threshold: 0
+        # 必须关：自清半径 = robot_radius，会把半径内的真实障碍当自身点抹掉。
+        # 不在 STVL 动态参数回调里，改了必须重启整套栈。
+        update_footprint_enabled: false
+        combination_method: 1
+        origin_z: 0.0
+        publish_voxel_map: false
+        transform_tolerance: 0.20
+        mapping_mode: false
+        map_save_duration: 60.0
+        observation_sources: realsense_mark realsense_mark_tall realsense_clear
+        # D435：标记/清除分源。realsense_mark 标离相机 1.5 m 内、≥0.15 m。距离是离相机的 3D 距离，相机高 1.24 m，
+        # 地上矮障碍水平只标到 base_link 前 ~1.1 m。2026-09-24 实机试过 2.0：1.5 m 外的矮障碍能标，但深度图顶部几行
+        # 掠射地面的错深度在 1.6~2.1 m 带反复出现（悬空 0.35~0.65 m）；开悬空点剔除后仍有残留，效果不好，退回 1.5。
+        # 两个标记源都吃 g1_nav_bridge/d435_mark_filter 的输出：4 邻域一致性剔除孤立飞点（镜头前 ~0.2 m、高 ~1.0 m，
+        # 在清除视锥外，贴着 base_link 挂满 voxel_decay）。use_d435_mark_filter:=false 时 launch 改回原始点云。
+        realsense_mark:
+          data_type: PointCloud2
+          topic: /camera/camera/depth/mark_points
+          transport_type: raw
+          marking: true
+          clearing: false
+          obstacle_range: 1.5
+          # 0.15。2026-09-24 实机试过 0.05（为了标 7~8 cm 的矮障碍），用户决定退回：D435 点云地面实测偏低 ~4.5 cm
+          # 且随站姿变，低门槛靠不住。
+          min_obstacle_height: 0.15
+          max_obstacle_height: 1.8
+          expected_update_rate: 0.0
+          observation_persistence: 0.0
+          inf_is_valid: false
+          filter: voxel
+          voxel_min_points: 4
+          clear_after_reading: true
+        # 高物体（人、桌面）：0.7~1.8 m、离相机 2.5 m 内；0.7 m 下限高于错深度簇。
+        realsense_mark_tall:
+          data_type: PointCloud2
+          topic: /camera/camera/depth/mark_points
+          transport_type: raw
+          marking: true
+          clearing: false
+          obstacle_range: 2.5
+          min_obstacle_height: 0.70
+          max_obstacle_height: 1.8
+          expected_update_rate: 0.0
+          observation_persistence: 0.0
+          inf_is_valid: false
+          filter: voxel
+          voxel_min_points: 4
+          clear_after_reading: true
+        # 深度相机视锥（model_type 0，max_z 沿光轴）。视锥内没再被标记的体素（人走后的格子）按 decay_acceleration
+        # 加速消失，只作用于本层。15.0 = STVL 官方示例值。
+        realsense_clear:
+          data_type: PointCloud2
+          topic: /camera/camera/depth/color/points
+          transport_type: raw
+          marking: false
+          clearing: true
+          max_z: 2.5
+          min_z: 0.20
+          min_obstacle_height: 0.05
+          max_obstacle_height: 1.8
+          vertical_fov_angle: 1.012
+          vertical_fov_padding: 0.05
+          horizontal_fov_angle: 1.518
+          decay_acceleration: 15.0
+          model_type: 0
+          filter: voxel
+          voxel_min_points: 2
+      # 2026-09-24 MID360 从 2D obstacle_layer 迁到 3D STVL（参照 Haier 3D 雷达：标记源 + 3D 雷达视锥清除源）。
+      # 2D 射线清除的问题：MID360 前方 ±30° 被头挡住，射线到不了，人走后的格子永远清不掉。
+      # STVL 按体素"最后一次被标记的时间"衰减，视锥内没再被标记的加速衰减，与射线能否到达无关。
+      # 单独一层是为了 footprint 自清：STVL 的自清开关是整层的。MID360 要像原 obstacle_layer
+      # （footprint_clearing_enabled: true）一样抹掉 robot_radius 内的格——demo2 回放里贴着家具走时，右侧
+      # 0.4~0.5 m 的家具进了内切带，MPPI 会判当前位姿已碰撞；D435 层必须不自清（正前方靠它在接触前停住）。
+      # 代价：两层互不清除。MID360 在前方盲区标的格只靠本层衰减 + 3D 雷达视锥清，不再借 D435 视锥。
+      mid360_voxel_layer:
+        plugin: "spatio_temporal_voxel_layer/SpatioTemporalVoxelLayer"
+        enabled: true
+        # 离开所有视锥的障碍（身后 3 m 外）保留 5 s 供规划绕行；视锥内没再看到的仍按加速度很快清掉。
+        voxel_decay: 5.0
+        decay_model: 0
+        voxel_size: 0.05
+        track_unknown_space: true
+        mark_threshold: 0
+        # 自清半径 = robot_radius。不在 STVL 动态参数回调里，改了必须重启整套栈。
+        update_footprint_enabled: true
+        combination_method: 1
+        origin_z: 0.0
+        publish_voxel_map: false
+        transform_tolerance: 0.20
+        mapping_mode: false
+        map_save_duration: 60.0
+        observation_sources: livox_mark livox_clear
+        # MID360：LIO 去畸变单帧（雷达系 + 扫描时刻），经 g1_nav_bridge/scan_range_filter 剔除离雷达 0.25 m 内的
+        # 机身回波（STVL 没有 obstacle_min_range，不剔除会在脚下标出致命格）。不要换成原始 /livox/points（未去畸变）。
+        livox_mark:
+          data_type: PointCloud2
+          topic: /lightning/registered_scan_nav
+          transport_type: raw
+          marking: true
+          clearing: false
+          # 离雷达的 3D 距离；步态摆动把远点甩得最狠（4 m 处 ±8° ≈ 56 cm），只标 2.5 m 内
+          obstacle_range: 2.5
+          # map 系高度，地面 z=0。0.15（原 0.10，与 D435 realsense_mark 一致）：2026-09-24 实机 global 层的单格
+          # 噪点（1~3 格、31 帧里只被 1~14 帧打到）支撑点全在 0.10~0.13 m，是刚越过 0.10 的地面回波
+          min_obstacle_height: 0.15
+          max_obstacle_height: 1.8
+          expected_update_rate: 0.0
+          # 攒满一个更新周期的帧（global 5 Hz → 0.2 s），否则两次更新之间的帧被丢掉、稀疏扫描下障碍会闪。
+          # 不要再大：每次更新都会把这段时间的帧重新标一遍，人走开后障碍多挂这么久（1 Hz 时代是 1.0）。
+          observation_persistence: 0.2
+          inf_is_valid: false
+          filter: voxel
+          voxel_min_points: 0
+          clear_after_reading: true
+        # 3D 雷达视锥（model_type 1）：水平 360°；垂直视锥只能关于雷达水平面对称，雷达系实测仰角 −50.5°~+6.4°
+        # （mid360_stvl_probe.py 的 p0.5/p99.5），取 ±51.6°（上半部分雷达看不到，那里的体素只是衰减快一点）。
+        # min_z/max_z 是水平半径，padding 单位是米。非重复扫描同一格重访间隔 p95 1.0 s、p99 2.4~2.8 s，
+        # 加速度取小（Haier 3D 雷达同为 1.0）：视锥内没再被打到的体素 local 活 1.21 s、global（decay 5）活 2.47 s。
+        livox_clear:
+          data_type: PointCloud2
+          topic: /lightning/registered_scan_nav
+          transport_type: raw
+          marking: false
+          clearing: true
+          model_type: 1
+          horizontal_fov_angle: 6.2832
+          vertical_fov_angle: 1.80
+          vertical_fov_padding: 0.05
+          min_z: 0.25
+          max_z: 3.0
+          min_obstacle_height: 0.10
+          max_obstacle_height: 1.8
+          decay_acceleration: 1.0
+          filter: voxel
+      keepout_layer:
+        plugin: "aid_costmap_plugin/KeepoutLayer"
+        enabled: true
+        filter_info_topic: /costmap_filter_info
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        # 全局用 6.0（比局部略缓），让 A* 在空旷处更愿意走通道中线；与旧系统一致。
+        cost_scaling_factor: 6.0
+        inflation_radius: 0.75
+      always_send_full_costmap: true

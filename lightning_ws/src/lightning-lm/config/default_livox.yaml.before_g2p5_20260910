@@ -1,0 +1,143 @@
+# G1：驱动对点云和内置 IMU 同时做 Rx(pi)，平移为零。
+# Unitree G1 + Livox MID-360 first-run configuration
+common:
+  dataset: "livox" # 在线订阅由下列 topic 和 lidar_type 决定；离线工具需单独检查枚举
+  lidar_topic: "points_raw"
+  livox_lidar_topic: "/livox/lidar"
+  imu_topic: "/livox/imu"
+
+# fasterlio 参数
+fasterlio:
+  lidar_type: 1                # 1 for Livox serials LiDAR, 2 for Velodyne LiDAR, 3 for ouster LiDAR,
+  scan_line: 4
+  blind: 0.1                # 盲区，小于盲区距离的不会处理
+  time_scale: 1e-3             # 兼容不同数据集的时间单位，仅对Velodyne LiDAR(lidar_type=2)生效
+
+  skip_lidar_num: 0 # 点云的跳帧情况
+  point_filter_num: 2 # 初始值：减少抽点，保留小障碍细节，需实测处理耗时
+  max_iteration: 4 # 最大迭代次数
+  filter_size_scan: 0.1 # 初始值：避免 0.5 m 降采样损失低矮障碍物细节
+  filter_size_map: 0.2
+
+  ivox_grid_resolution: 0.5        # default=0.2
+  ivox_nearby_type: 18             # 6, 18, 26
+  esti_plane_threshold: 0.1        # default=0.1
+
+  use_aa: false  # use anderson-acceleration
+
+  acc_cov: 0.1
+  gyr_cov: 0.1
+  b_acc_cov: 0.0001
+  b_gyr_cov: 0.0001
+  extrinsic_est_en: false      # true: enable the online estimation of IMU-LiDAR extrinsic
+  # p_imu = R * p_lidar + T：传感器内部外参，不是雷达到躯干的外参。
+  # 原始 T=[-0.011,-0.02329,0.04412]；两路同时 Rx(pi) 后 T'=Rx(pi)*T。
+  # 仅适用于当前驱动 roll=180,pitch=yaw=0,x=y=z=0。
+  extrinsic_T: [ -0.011, 0.02329, -0.04412 ]
+  extrinsic_R: [ 1, 0, 0,
+                 0, 1, 0,
+                 0, 0, 1 ]
+  keep_first_imu_estimation: false
+  kf_dis_th: 1.0
+  kf_angle_th: 10.0
+
+  enable_icp_part: false
+  plane_icp_weight: 300.0
+  min_pts: 500
+  imu_filter: false
+  proj_kfs: false
+
+
+g2p5:
+  esti_floor: true   # 是否动态估计地面
+  lidar_height: 1.23   # 暂定离地高度，须实测，不是 G1 标定值
+  floor_height: -1.23   # 暂定关键帧局部点云坐标系内的地面 Z，不是 RViz 网格高度
+  min_th_floor: 0.10  # 初始离地门槛 10 cm；更矮障碍须评估地面噪声后降低
+  max_th_floor: 1.8   # 初始离地上限，须结合现场障碍和身体范围验证
+  grid_map_resolution: 0.05 # 5 cm 栅格，不表示保证能检出 5 cm 障碍物
+
+system:
+  with_loop_closing: true # 是否需要回环检测
+  with_ui: true # 是否需要3D UI
+  with_2dui: false # 是否需要2D UI
+  with_g2p5: true # 是否需要栅格地图
+  step_on_kf: false # 是否在关键帧处暂停
+
+  enable_lidar_loc_skip: false
+  enable_lidar_loc_rviz: false
+  enable_lidar_odom_skip: false
+  evaluation: false
+  lidar_loc_skip_num: 4
+  lidar_odom_skip_num: 2
+  map_path: ./data/new_map/
+  pub_tf: true
+
+loop_closing:
+  loop_kf_gap: 20       # 每隔多少个关键帧检查一次
+  min_id_interval: 20   # 被检查的关键帧ID间隔
+  closest_id_th: 50     # 历史关键帧与当前帧的ID间隔
+  max_range: 20.0       # 候选帧的最大距离
+  ndt_score_th: 1.3     # ndt位姿分值
+  with_height: false
+
+
+### localization ================================================================================================
+lidar_loc:
+  enable_dynamic_polygon: false
+  enable_parking_static: true
+  enable_icp_adjust: false
+  filter_intensity_max: 100.0
+  filter_intensity_min: 10.0
+  filter_z_max: 30.0
+  filter_z_min: -1.0
+  force_2d: false
+  grid_search_angle_range: 180.0
+  grid_search_angle_step: 60
+  lidar_loc_odom_th: 0.5
+  init_with_fp: true
+  min_init_confidence: 1.8
+  update_dynamic_cloud: false
+  update_err_h: 0.2
+  update_err_v: 0.2
+  update_kf_dis: 2.0
+  update_lidar_loc_score: 2.5
+  loc_on_kf: true
+  try_self_extrap: false
+maps:
+  delete_when_unload: false
+  dyn_cloud_policy: persistent
+  load_dyn_cloud: true
+  load_map_size: 2
+  max_pts_dyn_chunk: 100000
+  save_dyn_when_quit: true
+  save_dyn_when_unload: false
+  unload_map_size: 4
+  with_dyn_area: false
+pgo:
+  dr_ang_noise: 0.5
+  dr_pos_noise: 1.0
+  dr_pos_noise_ratio: 1.0
+  lidar_loc_ang_noise: 1.0
+  lidar_loc_outlier_th: 5.0
+  lidar_loc_pos_noise: 0.3
+  lidar_odom_ang_noise: 1.0
+  lidar_odom_pos_noise: 0.3
+  pgo_frame_converge_ang_th: 1.0
+  pgo_frame_converge_pos_th: 0.05
+  rtk_fix_ang_noise: 2.0
+  rtk_fix_pos_noise: 1.0
+  rtk_height_noise_ratio: 10.0
+  rtk_other_ang_noise: 10.0
+  rtk_other_pos_noise: 5.0
+  rtk_outlier_th: 1.0
+  smooth_factor: 0.01
+roi:
+  height_max: 10.0
+  height_min: 1.1 # 原始雷达点云 Z 下限，保留地面和低于雷达的点
+  range_max: 70
+  range_min: 3.0
+ui:
+  car_length: 2.0
+  car_width: 1.6
+  car_height: 1.7
+  scans: 4

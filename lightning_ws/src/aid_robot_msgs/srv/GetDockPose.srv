@@ -1,0 +1,5 @@
+uint32 map_id
+---
+geometry_msgs/Pose point
+string message
+bool success

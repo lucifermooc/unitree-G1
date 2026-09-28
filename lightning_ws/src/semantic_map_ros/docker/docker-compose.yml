@@ -1,0 +1,11 @@
+# 语义地图用的向量数据库 Qdrant。启动：docker compose -f docker-compose.yml up -d
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant-semantic-map
+    restart: unless-stopped
+    ports:
+      - "6333:6333"   # HTTP 接口 + 网页 dashboard
+      - "6334:6334"   # gRPC 接口
+    volumes:
+      - ${HOME}/maps/qdrant_storage:/qdrant/storage   # 数据和地图数据库放在一起，重启不丢
