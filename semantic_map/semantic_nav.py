@@ -19,11 +19,12 @@ from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from query import search
 
 
-def goal_to_pose(best, stamp):
+def goal_to_pose(best):
     """语义地图查询结果（x, y, yaw）→ Nav2 的目标 PoseStamped。"""
     pose = PoseStamped()
     pose.header.frame_id = best["frame_id"]
-    pose.header.stamp = stamp
+    # 时间戳留 0 = "用最新的坐标变换"。目标点在地图上是固定的，不需要按某个时刻查变换；
+    # 如果填"现在"，定位（map->odom）稍有延迟时 Nav2 会报 extrapolation into the future 而放弃导航。
     pose.pose.position.x = float(best["x"])
     pose.pose.position.y = float(best["y"])
     # ROS 用四元数表示朝向；平面上只绕 z 轴转：z = sin(yaw/2)，w = cos(yaw/2)
@@ -50,7 +51,7 @@ class SemanticNavigator:
             result["nav_result"] = "NOT_FOUND"
             return result
 
-        goal = goal_to_pose(result["best"], self.navigator.get_clock().now().to_msg())
+        goal = goal_to_pose(result["best"])
         self.navigator.goToPose(goal)
         start = self.navigator.get_clock().now()
         canceled = False

@@ -2,6 +2,8 @@
 # - robot_radius 0.22 → 0.105（TurtleBot3 burger 的尺寸）
 # - 发布/订阅 cmd_vel 的节点加 enable_stamped_cmd_vel: true（TurtleBot3 仿真要 TwistStamped）
 # - bt_navigator default_server_timeout 20 → 200 ms
+# - 控制器/代价地图 transform_tolerance 加大（Cartographer 定位有几十毫秒延迟）
+# - 到达判定 xy_goal_tolerance 0.25 → 0.15 m
 # 定位由 Cartographer 负责，文件里的 amcl 段不会被用到。
 amcl:
   ros__parameters:
@@ -98,7 +100,7 @@ controller_server:
     general_goal_checker:
       stateful: True
       plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.25
+      xy_goal_tolerance: 0.15  # 原 0.25；停得更准，到达后再滑行一点也在 0.3 m 内
       yaw_goal_tolerance: 0.25
     FollowPath:
       plugin: "nav2_mppi_controller::MPPIController"
@@ -119,7 +121,7 @@ controller_server:
       wz_max: 1.9
       iteration_count: 1
       prune_distance: 1.7
-      transform_tolerance: 0.1
+      transform_tolerance: 0.3  # 原 0.1；Cartographer 定位的 map->odom 有几十毫秒延迟
       temperature: 0.3
       gamma: 0.015
       motion_model: "DiffDrive"
@@ -194,6 +196,7 @@ controller_server:
 local_costmap:
   local_costmap:
     ros__parameters:
+      transform_tolerance: 0.5  # 同上，给定位延迟留余量
       update_frequency: 5.0
       publish_frequency: 2.0
       global_frame: odom
@@ -236,6 +239,7 @@ local_costmap:
 global_costmap:
   global_costmap:
     ros__parameters:
+      transform_tolerance: 0.5  # 同上，给定位延迟留余量
       update_frequency: 1.0
       publish_frequency: 1.0
       global_frame: map
