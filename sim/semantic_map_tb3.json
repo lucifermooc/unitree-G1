@@ -1,0 +1,10 @@
+[
+  {"id": 1, "title": "前台", "description": "公司入口处的接待台，访客登记、取快递、问路都在这里", "pose": {"x": 0.35, "y": 1.05, "yaw": 3.14}, "frame_id": "map"},
+  {"id": 2, "title": "茶水间", "description": "有饮水机和咖啡机，可以接水、喝水、泡茶、冲咖啡", "pose": {"x": 3.65, "y": 1.05, "yaw": 0.0}, "frame_id": "map"},
+  {"id": 3, "title": "厨房", "description": "有灶台、微波炉和水槽，可以做饭、热饭、洗碗", "pose": {"x": 3.55, "y": -1.0, "yaw": 0.0}, "frame_id": "map"},
+  {"id": 4, "title": "会议室", "description": "有大桌子、投影仪和白板，用来开会、讨论和做汇报", "pose": {"x": 2.0, "y": 2.45, "yaw": 1.57}, "frame_id": "map"},
+  {"id": 5, "title": "充电桩", "description": "机器人充电的地方，电量低、没电了就回到这里充电", "pose": {"x": -0.1, "y": 0.0, "yaw": 0.0}, "frame_id": "map"},
+  {"id": 6, "title": "卫生间", "description": "厕所和洗手池，上厕所、洗手的地方", "pose": {"x": 2.0, "y": -1.55, "yaw": -1.57}, "frame_id": "map"},
+  {"id": 7, "title": "仓库", "description": "存放纸箱、工具和备用零件的储物间，搬运和取放物品", "pose": {"x": 1.45, "y": -0.05, "yaw": 0.0}, "frame_id": "map"},
+  {"id": 8, "title": "办公区", "description": "员工的工位和电脑，大家平时工作、写代码的区域", "pose": {"x": 2.55, "y": 1.05, "yaw": 1.57}, "frame_id": "map"}
+]
