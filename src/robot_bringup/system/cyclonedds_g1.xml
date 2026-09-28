@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  G1 外挂计算机（Thor）的 CycloneDDS 配置。robot.launch.py 通过 dds_config 参数把本文件设成
+  CYCLONEDDS_URI，覆盖 /home/unitree/unitree_ros2/setup.sh 里的默认值（默认值只绑定网卡、不限制组播）。
+  手动开 rviz2 / ros2 CLI 的终端请先 `source <share>/robot_bringup/system/dds_env.sh`。
+
+  与原默认值唯一的行为差别：
+  1) AllowMulticast=spdp —— 组播只用于参与者发现(SPDP, 239.255.0.1:7400)，端点发现与用户数据全部单播。
+     默认值在有线网卡上等于 true：只要一个话题有 2 个以上订阅者，数据就发往组播，订阅者全在本机也照样
+     上 enP2p1s0 网线。2026-09-19 实测后果：Thor 往网线发约 78 Mbit/s 组播（realsense 32 + livox 30 +
+     定位 16），机器人内部交换机持续回送 PAUSE 约 1840 次/s（推断组播泛洪打满了 100M 端口），Thor 发送被
+     压到约 80 Mbit/s，livox 驱动的 16 帧队列排满 → 点云到达定位时滞后约 2 s、帧率掉到 8.5 Hz 且丢帧。
+     定位于是每帧都从 2 s 前的状态做纯 IMU 匀速外推，输出 map->base_link 出现约 1.7 m 的跳变
+     （录包注入 2 s 滞后可复现约 300 次/5 min，注入 0.15 s 则为 0 次）。
+     本机进程之间改走单播后目的地址是本机 IP，内核经 lo 投递，不上网线；发往机器人本体(192.168.123.161)
+     的数据仍是单播，本体也仍能通过 SPDP 组播发现 Thor。
+  2) MaxAutoParticipantIndex=100 —— rmw_cyclonedds 默认 32，本机常态已占 28 个参与者，再开 rviz2 或
+     ros2 CLI 就会报 "Failed to find a free participant index for domain 0"。无 Peers 时调大不增加流量。
+     （上限 119；100 对应端口最高 7611，不与 domain 1 的 7650 起始端口重叠）
+
+  注意：网卡名与机器人本体网段绑定，换机器需同步修改。
+-->
+<CycloneDDS xmlns="https://cdds.io/config">
+  <Domain Id="any">
+    <General>
+      <Interfaces>
+        <NetworkInterface name="enP2p1s0" priority="default" multicast="default"/>
+      </Interfaces>
+      <AllowMulticast>spdp</AllowMulticast>
+    </General>
+    <Discovery>
+      <MaxAutoParticipantIndex>100</MaxAutoParticipantIndex>
+    </Discovery>
+  </Domain>
+</CycloneDDS>

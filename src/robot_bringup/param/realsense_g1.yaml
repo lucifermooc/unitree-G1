@@ -1,0 +1,36 @@
+# D435 点云配置。点云只喂 Nav2 local costmap 的 STVL，STVL 只用 XYZ 标记/清除障碍。
+#
+# 参数前缀：librealsense 已随仓库放在 src/librealsense（包名 librealsense2，2.58.4），
+# 由 colcon 编译且固定 BUILD_WITH_NEON=OFF（见其 CMake/lrs_options.cmake），
+# 点云滤波器名为 "Pointcloud"，ROS 参数是标准的 pointcloud.*。
+# 若 realsense2_camera 链接到的是系统里 NEON 版 SDK（/usr/local/lib，滤波器名 "Pointcloud (NEON)"），
+# 参数会变成 pointcloud__neon_.*，下面这些设置全部失效、点云话题停发。
+# 检查：ldd install/realsense2_camera/lib/librealsense2_camera.so | grep librealsense2
+#       应指向 install/librealsense2/lib。
+
+pointcloud.enable: true
+# 0 = RS2_STREAM_ANY，不做纹理映射，只输出 XYZ，点云不依赖 color 流。
+# 非 0（如 2=COLOR）在 frameset 里找不到匹配纹理帧时会整帧不发。
+pointcloud.stream_filter: 0
+pointcloud.allow_no_texture_points: true
+# ordered_pc=true 会按 depth 分辨率输出全部像素（含无效点），带宽显著变大，STVL 不需要。
+pointcloud.ordered_pc: false
+
+# 3 = High Accuracy：提高双目匹配置信度门限，宁可留空洞也不输出误匹配点。
+# 默认预设下掠射远地面的误匹配点会被抬高成假障碍（STVL 在局部 costmap 满屏标记）。
+depth_module.visual_preset: 3
+
+# 深度滤波调参值。目标是深度噪点/毛刺和地面"不平、有空洞、打穿"这类原始深度质量问题。
+# spatial：边缘保持的平滑，默认开（sensor_driver.launch.py），2026-09-24 调到最强平滑：
+#   filter_magnitude 5 = 最大迭代次数（1~5），filter_smooth_alpha 0.25 = 最强平滑（0.25~1，1 = 不滤）；
+#   filter_smooth_delta 20 保持不变：调大会跨物体边缘平滑，把前景/背景混成悬空飞点；
+#   holes_fill 0：不补洞，不编造深度。
+spatial_filter.filter_magnitude: 5
+spatial_filter.filter_smooth_alpha: 0.25
+spatial_filter.filter_smooth_delta: 20
+spatial_filter.holes_fill: 0
+# temporal（由 realsense_depth_filters 控制，默认关）：逐像素时间平滑，压逐帧闪烁。holes_fill 在这里是 persistency 模式，驱动默认 3，
+# 必须设 0：非 0 会用历史深度补当前空洞，人走开后原位置还留着"记忆"，正好制造残影。
+temporal_filter.filter_smooth_alpha: 0.4
+temporal_filter.filter_smooth_delta: 20
+temporal_filter.holes_fill: 0

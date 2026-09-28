@@ -1,0 +1,2388 @@
+// License: Apache 2.0. See LICENSE file in root directory.
+// Copyright(c) 2024 RealSense, Inc. All Rights Reserved.
+
+#include "post-processing-filters-list.h"
+#include "post-processing-block-model.h"
+#ifdef BUILD_WITH_CLOSE_RANGE_DEPTH
+#include "close-range-depth-filter.h"
+#include "rs-depth-range-loader.h"
+#endif
+#include <imgui_internal.h>
+#include <realsense_imgui.h>
+
+#include "metadata-helper.h"
+#include "subdevice-model.h"
+#include <rsutils/accelerators/gpu.h>
+
+namespace rs2
+{
+    // --- subdevice_model::config_save_worker ---------------------------------------------------
+    // Defined out-of-line; the class is declared as a private nested type in subdevice-model.h.
+
+    subdevice_model::config_save_worker & subdevice_model::config_save_worker::instance()
+    {
+        static config_save_worker w;
+        return w;
+    }
+
+    subdevice_model::config_save_worker::config_save_worker()
+        : _worker( [this] { run(); } )
+    {
+    }
+
+    subdevice_model::config_save_worker::~config_save_worker()
+    {
+        {
+            std::lock_guard< std::mutex > lk( _mtx );
+            _stop = true;
+        }
+        _cv.notify_one();
+        if( _worker.joinable() ) _worker.join();
+    }
+
+    void subdevice_model::config_save_worker::post( void * key, std::function< void() > job )
+    {
+        {
+            std::lock_guard< std::mutex > lk( _mtx );
+            _pending[key] = std::move( job );
+        }
+        _cv.notify_one();
+    }
+
+    void subdevice_model::config_save_worker::cancel( void * key )
+    {
+        std::lock_guard< std::mutex > lk( _mtx );
+        _pending.erase( key );
+    }
+
+    void subdevice_model::config_save_worker::run()
+    {
+        for( ;; )
+        {
+            std::vector< std::function< void() > > jobs;
+            bool stopping = false;
+            {
+                std::unique_lock< std::mutex > lk( _mtx );
+                _cv.wait( lk, [this] { return _stop || ! _pending.empty(); } );
+                stopping = _stop;
+                for( auto & kv : _pending ) jobs.push_back( std::move( kv.second ) );
+                _pending.clear();
+            }
+            for( auto & job : jobs )
+            {
+                try { job(); } catch( ... ) {}
+            }
+            if( stopping ) return;
+        }
+    }
+
+    // -------------------------------------------------------------------------------------------
+
+    std::vector<const char*> get_string_pointers(const std::vector<std::string>& vec)
+    {
+        std::vector<const char*> res;
+        for (auto&& s : vec) res.push_back(s.c_str());
+        return res;
+    }
+
+    std::string get_post_processing_device_sensor_name(subdevice_model* sub)
+    {
+        std::stringstream ss;
+        ss << configurations::viewer::post_processing
+            << "." << sub->dev.get_info(RS2_CAMERA_INFO_NAME)
+            << "." << sub->s->get_info(RS2_CAMERA_INFO_NAME);
+        return ss.str();
+    }
+
+    void subdevice_model::populate_options( const std::string & opt_base_label,
+                                            bool * options_invalidated,
+                                            std::string & error_message )
+    {
+        try
+        {
+            auto supported_options = s->get_supported_option_values();
+            for( rs2::option_value option : supported_options )
+            {
+                // Build the model first and insert only on success: options that cannot be
+                // queried (e.g. a MIPI color control with no V4L2 CID mapping) throw here, and
+                // map::operator[] would otherwise leave a default-constructed (null-endpoint)
+                // entry that crashes subdevice_model::update(). Isolate per option so one bad
+                // control does not drop the rest.
+                try
+                {
+                    auto model = create_option_model( option, opt_base_label, this, s, options_invalidated, error_message );
+                    options_metadata[option->id] = std::move( model );
+                }
+                catch( const std::exception & e )
+                {
+                    if( viewer.not_model )
+                        viewer.not_model->add_log( e.what(), RS2_LOG_SEVERITY_WARN );
+                }
+            }
+
+            s->on_options_changed( [this]( const options_list & list )
+            {
+                for( auto changed_option : list )
+                {
+                    auto it = options_metadata.find( changed_option->id );
+                    if( it != options_metadata.end() && ! _destructing ) // Callback runs in different context, check options_metadata still valid
+                    {
+                        it->second.update_value( changed_option, *viewer.not_model );
+                    }
+                }
+            } );
+        }
+        catch( const std::exception & e )
+        {
+            if( viewer.not_model )
+                viewer.not_model->add_log( e.what(), RS2_LOG_SEVERITY_WARN );
+        }
+    }
+
+    subdevice_model::subdevice_model(
+        device& dev,
+        std::shared_ptr<sensor> s,
+        std::shared_ptr< atomic_objects_in_frame > device_detected_objects,
+        std::string& error_message,
+        viewer_model& viewer,
+        device_model* dev_model,
+        bool new_device_connected
+    )
+        : s(s), dev(dev), ui(), last_valid_ui(), dev_model(dev_model),
+        streaming(false), _pause(false),
+        depth_colorizer(std::make_shared<rs2::gl::colorizer>()),
+        yuy2rgb(std::make_shared<rs2::gl::yuy_decoder>()),
+        m420_to_rgb(std::make_shared<rs2::gl::m420_decoder>()),
+        nv12_to_rgb(std::make_shared<rs2::gl::nv12_decoder>()),
+        y411(std::make_shared<rs2::gl::y411_decoder>()),
+        viewer(viewer),
+        detected_objects(device_detected_objects),
+        _destructing( false ),
+        // Queue capacity is generous: even rapid slider drags coalesce into at most one
+        // queued job per option (see option_model::set_option_async), so realistically
+        // depth ≪ 16.
+        _set_dispatcher( std::make_shared< dispatcher >( 64u ) )
+    {
+        // dispatcher's worker thread starts in _was_stopped=true; invoke() is a
+        // silent no-op until start() is called. (The header comment claiming it
+        // "starts out 'started'" disagrees with the constructor in src/dispatcher.cpp.)
+        _set_dispatcher->start();
+        supported_options = s->get_supported_options();
+        restore_processing_block("colorizer", depth_colorizer);
+        restore_processing_block("yuy2rgb", yuy2rgb);
+        restore_processing_block("m420_to_rgb", m420_to_rgb);
+        restore_processing_block("nv12_to_rgb", nv12_to_rgb);
+        restore_processing_block("y411", y411);
+
+        post_processing_enabled = is_post_processing_enabled_in_config_file();
+
+        try
+        {
+            if (s->supports(RS2_OPTION_ENABLE_AUTO_EXPOSURE))
+                auto_exposure_enabled = s->get_option(RS2_OPTION_ENABLE_AUTO_EXPOSURE) > 0;
+        }
+        catch (...)
+        {
+
+        }
+
+        try
+        {
+            if (s->supports(RS2_OPTION_DEPTH_UNITS))
+                depth_units = s->get_option(RS2_OPTION_DEPTH_UNITS);
+        }
+        catch (...) {}
+
+        try
+        {
+            if (s->supports(RS2_OPTION_STEREO_BASELINE))
+                stereo_baseline = s->get_option(RS2_OPTION_STEREO_BASELINE);
+        }
+        catch (...) {}
+
+        bool const is_rgb_camera = s->is< color_sensor >();
+
+        // The close-range improver must run before get_recommended_filters() (decimation, spatial, temporal…).
+        // Decimation halves depth resolution while leaving IR unchanged; the mismatch would
+        // trigger the resolution guard in close_range_depth_improver::apply() and silently skip the improver.
+#ifdef BUILD_WITH_CLOSE_RANGE_DEPTH
+        if( !is_rgb_camera && s->supports( RS2_OPTION_STEREO_BASELINE ) )
+        {
+            auto block = std::make_shared< close_range_depth_filter >();
+            auto model = std::make_shared< processing_block_model >(
+                this, "Improved Close Range Depth", block,
+                [block]( rs2::frame f ) { return block->process( f ); },
+                error_message, false );
+
+            if( ! get_rs_depth_range_loader().is_loaded() )
+            {
+                model->available = []() { return false; };
+                model->unavailable_tooltip = "Improved Close Range Depth library not found; install librealsense2-enhanced-depth package";
+            }
+            else if( !rsutils::rs2_is_cuda_available() )
+            {
+                model->available = []() { return false; };
+                model->unavailable_tooltip = "Improved Close Range Depth requires CUDA (not detected on this system)";
+            }
+            else
+            {
+                // Safe to capture this: the lambda lives in model which lives in post_processing,
+                // a member of this subdevice_model — so the lambda cannot outlive its owner.
+                model->available = [this]()
+                {
+                    // Resolution check — VGA (640x480) minimum
+                    if( ui.is_multiple_resolutions )
+                    {
+                        // Per-stream resolutions: check depth and IR independently
+                        auto check = [&]( rs2_stream stream ) {
+                            auto it = ui.selected_stream_to_res.find( stream );
+                            if( it == ui.selected_stream_to_res.end() ) return false;
+                            return it->second.first >= 640 && it->second.second >= 480;
+                        };
+                        if( !check( RS2_STREAM_DEPTH ) || !check( RS2_STREAM_INFRARED ) )
+                            return false;
+                    }
+                    else if( !res_values.empty()
+                             && ui.selected_res_id >= 0
+                             && ui.selected_res_id < static_cast< int >( res_values.size() ) )
+                    {
+                        const auto& res = res_values.at( ui.selected_res_id );
+                        if( res.first < 640 || res.second < 480 )
+                            return false;
+                    }
+
+                    bool depth = false, ir1 = false, ir2 = false;
+                    for( auto& p : profiles )
+                    {
+                        auto it = stream_enabled.find( p.unique_id() );
+                        if( it == stream_enabled.end() || !it->second ) continue;
+                        if( p.stream_type() == RS2_STREAM_DEPTH ) depth = true;
+                        else if( p.stream_type() == RS2_STREAM_INFRARED && p.stream_index() == 1 ) ir1 = true;
+                        else if( p.stream_type() == RS2_STREAM_INFRARED && p.stream_index() == 2 ) ir2 = true;
+                    }
+                    return depth && ir1 && ir2;
+                };
+                model->unavailable_tooltip = "Depth, IR Left/Right streams have to be enabled at VGA or higher resolution";
+            }
+
+            post_processing.push_back( model );
+        }
+#endif
+
+        for (auto&& f : s->get_recommended_filters())
+        {
+            auto shared_filter = std::make_shared<filter>(f);
+            auto model = std::make_shared<processing_block_model>(
+                this, shared_filter->get_info(RS2_CAMERA_INFO_NAME), shared_filter,
+                [=](rs2::frame f) { return shared_filter->process(f); }, error_message);
+
+            if (shared_filter->is<hole_filling_filter>())
+                model->enable(false);
+
+            if (shared_filter->is<sequence_id_filter>())
+                model->enable(false);
+
+            if (shared_filter->is<decimation_filter>())
+            {
+                if (is_rgb_camera)
+                    model->enable(false);
+            }
+
+            if( shared_filter->is< rotation_filter >() )
+                model->enable( false );
+
+            if (shared_filter->is<threshold_filter>())
+            {
+                if (s->supports(RS2_CAMERA_INFO_PRODUCT_ID))
+                {
+                    // using short range for D405
+                    std::string device_pid = s->get_info(RS2_CAMERA_INFO_PRODUCT_ID);
+                    if (device_pid == "0B5B")
+                    {
+                        auto threshold_pb = shared_filter->as<threshold_filter>();
+                        threshold_pb.set_option(RS2_OPTION_MIN_DISTANCE, SHORT_RANGE_MIN_DISTANCE);
+                        threshold_pb.set_option(RS2_OPTION_MAX_DISTANCE, SHORT_RANGE_MAX_DISTANCE);
+                    }
+                }
+                model->enable( false );
+            }
+
+            if (shared_filter->is<hdr_merge>())
+            {
+                // processing block will be skipped if the requested option is not supported
+                if (std::find(supported_options.begin(), supported_options.end(), RS2_OPTION_SEQUENCE_ID) == supported_options.end())
+                    continue;
+            }
+
+            post_processing.push_back(model);
+        }
+
+        for (auto&& f : s->query_embedded_filters())
+        {
+            auto shared_filter = std::make_shared<embedded_filter>(f);
+
+            auto model = std::make_shared<embedded_filter_model>(
+                this, shared_filter->get_type(), shared_filter, viewer, error_message);
+
+            // Dual-color variants (0C01/0C04/0C07) share a depth+color sensor, so close-range runs depth-only.
+            std::string device_pid = s->supports( RS2_CAMERA_INFO_PRODUCT_ID )
+                                   ? s->get_info( RS2_CAMERA_INFO_PRODUCT_ID ) : "";
+            const bool is_dual_color = ( device_pid == "0C01" || device_pid == "0C04" || device_pid == "0C07" );
+            if( shared_filter->get_type() == RS2_EMBEDDED_FILTER_TYPE_CLOSE_RANGE && is_dual_color )
+            {
+                // Safe to capture this: the lambda lives in model which lives in embedded_filters,
+                // a member of this subdevice_model — so it cannot outlive its owner.
+                model->available_predicate = [this]()
+                {
+                    // Only a live color stream conflicts with close range; while stopped
+                    // the toggle stays available even if color is selected for the next run.
+                    if( !streaming )
+                        return true;
+                    for( auto& p : profiles )
+                    {
+                        auto it = stream_enabled.find( p.unique_id() );
+                        if( it != stream_enabled.end() && it->second && p.stream_type() == RS2_STREAM_COLOR )
+                            return false;
+                    }
+                    return true;
+                };
+                model->unavailable_tooltip = "Improved Close Range Depth cannot be activated while color streams are active";
+            }
+
+            embedded_filters.push_back(model);
+        }
+
+        if (is_rgb_camera)
+        {
+            for (auto& create_filter : post_processing_filters_list::get())
+            {
+                auto filter = create_filter();
+                if (!filter)
+                    continue;
+                filter->start(*this);
+                std::shared_ptr< processing_block_model > model(
+                    new post_processing_block_model{
+                        this, filter,
+                        [=](rs2::frame f) { return filter->process(f); },
+                        error_message
+                    });
+                post_processing.push_back(model);
+            }
+        }
+
+        auto colorizer = std::make_shared<processing_block_model>(
+            this, "Depth Visualization", depth_colorizer,
+            [=](rs2::frame f) { return depth_colorizer->colorize(f); }, error_message);
+        const_effects.push_back(colorizer);
+
+
+        if (s->supports(RS2_CAMERA_INFO_PRODUCT_ID))
+        {
+            std::string device_pid = s->get_info(RS2_CAMERA_INFO_PRODUCT_ID);
+
+            // using short range for D405
+            if (device_pid == "0B5B")
+            {
+                std::string error_msg;
+                depth_colorizer->set_option(RS2_OPTION_MIN_DISTANCE, SHORT_RANGE_MIN_DISTANCE);
+                depth_colorizer->set_option(RS2_OPTION_MAX_DISTANCE, SHORT_RANGE_MAX_DISTANCE);
+            }
+        }
+
+        // Hack to restore "Enable Histogram Equalization" flag if needed.
+        // The flag is set to true by colorizer constructor, but setting min/max_distance options above or during
+        // restore_processing_block earlier, causes the registered observer to unset it, which is not the desired
+        // behaviour. Observer should affect only if a user is setting the values after construction phase is over.
+        if (depth_colorizer->supports(RS2_OPTION_VISUAL_PRESET))
+        {
+            auto option_value = depth_colorizer->get_option(RS2_OPTION_VISUAL_PRESET);
+            depth_colorizer->set_option(RS2_OPTION_VISUAL_PRESET, option_value);
+        }
+
+        std::stringstream ss;
+        ss << "##" << dev.get_info(RS2_CAMERA_INFO_NAME)
+            << "/" << s->get_info(RS2_CAMERA_INFO_NAME)
+            << "/" << (long long)this;
+
+        if (s->supports(RS2_CAMERA_INFO_PHYSICAL_PORT) && dev.supports(RS2_CAMERA_INFO_PRODUCT_LINE))
+        {
+            std::string product = dev.get_info(RS2_CAMERA_INFO_PRODUCT_LINE);
+            std::string id = s->get_info(RS2_CAMERA_INFO_PHYSICAL_PORT);
+
+            bool has_metadata = !rs2::metadata_helper::instance().can_support_metadata(product)
+                || rs2::metadata_helper::instance().is_enabled(id);
+            static bool showed_metadata_prompt = false;
+
+            if (!has_metadata && !showed_metadata_prompt)
+            {
+                auto n = std::make_shared<metadata_warning_model>();
+                viewer.not_model->add_notification(n);
+                showed_metadata_prompt = true;
+            }
+        }
+
+        try
+        {
+            auto sensor_profiles = s->get_stream_profiles();
+            reverse(begin(sensor_profiles), end(sensor_profiles));
+            std::map<int, rs2_format> def_format{ {0, RS2_FORMAT_ANY} };
+            auto default_resolution = std::make_pair(1280, 720);
+            auto default_fps = 30;
+            std::map<int, int> def_fps_per_stream;   // per-stream default-profile FPS (by unique_id)
+            for (auto&& profile : sensor_profiles)
+            {
+                std::stringstream res;
+                if (auto vid_prof = profile.as<video_stream_profile>())
+                {
+                    if (profile.is_default())
+                    {
+                        default_resolution = std::pair<int, int>(vid_prof.width(), vid_prof.height());
+                        default_fps = profile.fps();
+
+                        if (is_rgb_camera)
+                        {
+                            auto intrinsics = vid_prof.get_intrinsics();
+                            if (intrinsics.model == RS2_DISTORTION_INVERSE_BROWN_CONRADY
+                                && (std::abs(intrinsics.coeffs[0]) > std::numeric_limits< float >::epsilon() ||
+                                    std::abs(intrinsics.coeffs[1]) > std::numeric_limits< float >::epsilon() ||
+                                    std::abs(intrinsics.coeffs[2]) > std::numeric_limits< float >::epsilon() ||
+                                    std::abs(intrinsics.coeffs[3]) > std::numeric_limits< float >::epsilon() ||
+                                    std::abs(intrinsics.coeffs[4]) > std::numeric_limits< float >::epsilon()))
+                            {
+                                uvmapping_calib_full = true;
+                            }
+                        }
+                    }
+                    
+                    if (!hide_resolutions(profile))
+                    {
+                        res << vid_prof.width() << " x " << vid_prof.height();
+                        push_back_if_not_exists(res_values, std::pair<int, int>(vid_prof.width(), vid_prof.height()));
+                        push_back_if_not_exists(resolutions, res.str());
+                        push_back_if_not_exists(resolutions_per_stream[profile.stream_type()], std::pair<int, int>(vid_prof.width(), vid_prof.height()));
+                    }
+                }
+
+                std::stringstream fps;
+                fps << profile.fps();
+                push_back_if_not_exists(fps_values_per_stream[profile.unique_id()], profile.fps());
+                push_back_if_not_exists(shared_fps_values, profile.fps());
+                push_back_if_not_exists(fpses_per_stream[profile.unique_id()], fps.str());
+                push_back_if_not_exists(shared_fpses, fps.str());
+                stream_display_names[profile.unique_id()] = profile.stream_name();
+
+                std::string format = rs2_format_to_string(profile.format());
+
+                push_back_if_not_exists(formats[profile.unique_id()], format);
+                push_back_if_not_exists(format_values[profile.unique_id()], profile.format());
+
+                if (profile.is_default())
+                {
+                    stream_enabled[profile.unique_id()] = true;
+                    def_format[profile.unique_id()] = profile.format();
+                    def_fps_per_stream[profile.unique_id()] = profile.fps();
+                }
+
+                profiles.push_back(profile);
+            }
+            auto any_stream_enabled = std::any_of(std::begin(stream_enabled), std::end(stream_enabled), [](const std::pair<int, bool>& p) { return p.second; });
+            if (!any_stream_enabled)
+            {
+                if (sensor_profiles.size() > 0)
+                    stream_enabled[sensor_profiles.rbegin()->unique_id()] = true;
+            }
+
+            for (auto&& fps_list : fps_values_per_stream)
+            {
+                sort_together(fps_list.second, fpses_per_stream[fps_list.first]);
+            }
+            sort_together(shared_fps_values, shared_fpses);
+            for (auto&& res_list : resolutions_per_stream)
+            {
+                sort_resolutions(res_list.second);
+            }
+            sort_together(res_values, resolutions);
+
+            // Compute common FPS once and reuse it for mode decision and shared default (video streams)
+            auto common_fps = get_common_fps();
+            show_single_fps_list = !common_fps.empty() && !res_values.empty();
+
+            int selection_index{};
+
+            if (!show_single_fps_list)
+            {
+                // Each stream gets its own FPS selection. Prefer the stream's own default-profile FPS.
+                // Assign for every stream so all land on a valid profile.
+                for (const auto& fps_array : fps_values_per_stream)
+                {
+                    if (fps_array.second.empty())
+                        continue;
+                    auto def_it = def_fps_per_stream.find(fps_array.first);
+                    int stream_default = (def_it != def_fps_per_stream.end()) ? def_it->second : default_fps;
+                    get_default_selection_index(fps_array.second, stream_default, &selection_index);
+                    ui.selected_fps_id[fps_array.first] = selection_index;
+                }
+            }
+            else
+            {
+                // The single shared FPS is applied to all streams, so the default must be a
+                // value every stream supports. Prefer default_fps when it's common; otherwise
+                // fall back to the highest common FPS (the union's min/max may not be common -
+                // e.g. motion's union {100,200,400} where only 200 is common).
+                int desired = default_fps;
+                if (std::find(common_fps.begin(), common_fps.end(), default_fps) == common_fps.end())
+                    desired = *std::max_element(common_fps.begin(), common_fps.end());
+                if (get_default_selection_index(shared_fps_values, desired, &selection_index))
+                    ui.selected_shared_fps_id = selection_index;
+            }
+
+            for (auto format_array : format_values)
+            {
+                if (get_default_selection_index(format_array.second, def_format[format_array.first], &selection_index))
+                {
+                    ui.selected_format_id[format_array.first] = selection_index;
+                }
+            }
+
+            if (is_multiple_resolutions_supported())
+            {
+                ui.is_multiple_resolutions = true;
+                for (auto res_array : resolutions_per_stream)
+                {
+                    ui.selected_stream_to_res[res_array.first] = default_resolution;
+                }
+            }
+            else
+            {
+                get_default_selection_index(res_values, default_resolution, &selection_index);
+                ui.selected_res_id = selection_index;
+            }
+
+            if (ui.is_multiple_resolutions)
+            {
+                apply_decimation_resolution_defaults();
+                for (auto it = ui.selected_stream_to_res.begin(); it != ui.selected_stream_to_res.end(); ++it)
+                {
+                    if (!is_selected_combination_supported())
+                    {
+                        auto cur_stream = it->first;
+                        auto resolutions_for_current_stream = resolutions_per_stream[cur_stream];
+                        if (resolutions_for_current_stream.size() == 0)
+                            throw std::runtime_error("Multiple Resolution Issue, please check your requested resolution");
+
+                        auto res_it = resolutions_for_current_stream.end() - 1;
+                        ui.selected_stream_to_res[cur_stream] = *res_it;
+
+                        while (res_it->first && !is_selected_combination_supported())
+                            --res_it;
+                    }
+                }
+            }
+            else
+            {
+                while (ui.selected_res_id >= 0 && !is_selected_combination_supported())
+                    ui.selected_res_id--;
+            }
+            last_valid_ui = ui;
+        }
+        catch (const error& e)
+        {
+            error_message = error_to_string(e);
+        }
+        _opt_base_label = ss.str();
+        populate_options(_opt_base_label.c_str(), &_options_invalidated, error_message);
+    }
+
+    subdevice_model::~subdevice_model()
+    {
+        // cancel() drops any not-yet-started save job for this subdevice. If the
+        // worker has already dequeued and is running our lambda, cancel is a no-op —
+        // but that's safe because the lambda intentionally captures only shared_ptrs
+        // to the processing blocks (by value), never `this`. So `subdevice_model`'s
+        // dtor doesn't need to wait for the worker; the in-flight save will finish on
+        // its own without dereferencing any member of *this.
+        config_save_worker::instance().cancel( this );
+        _destructing = true;
+        try
+        {
+            wait_for_stop();
+        }
+        catch( ... )
+        {
+        }
+        try
+        {
+            s->on_options_changed( []( const options_list & list ) {} );
+        }
+        catch( ... )
+        {
+        }
+    }
+
+    void subdevice_model::repopulate_options()
+    {
+        std::string error_message;
+        populate_options(_opt_base_label.c_str(), &_options_invalidated, error_message);
+    }
+
+    bool subdevice_model::is_post_processing_enabled_in_config_file() const
+    {
+        bool is_enabled = false;
+
+        std::string device_name(dev.get_info(RS2_CAMERA_INFO_NAME));
+        std::string sensor_name(s->get_info(RS2_CAMERA_INFO_NAME));
+
+        std::stringstream ss;
+        ss << configurations::viewer::post_processing
+            << "." << device_name
+            << "." << sensor_name;
+        auto key = ss.str();
+
+        if (config_file::instance().contains(key.c_str()))
+        {
+            is_enabled = config_file::instance().get(key.c_str());
+        }
+        return is_enabled;
+    }
+
+    void subdevice_model::sort_resolutions(std::vector<std::pair<int, int>>& resolutions) const
+    {
+        std::sort(resolutions.begin(), resolutions.end(),
+            [](const std::pair<int, int>& a, const std::pair<int, int>& b) {
+                if (a.first != b.first)
+                    return (a.first < b.first);
+                return (a.second <= b.second);
+            });
+    }
+
+    // Returns the FPS values supported by every (non-empty) stream of this subdevice - the
+    // intersection of the per-stream FPS lists. e.g. depth/IR expose {90,30,25,20,15,5} and a
+    // color stream exposes {30,25,20,15} -> common {30,25,20,15}; accel {100,200} and gyro
+    // {200,400} -> common {200}. Empty when the streams share no rate (per-stream FPS needed).
+    std::vector<int> subdevice_model::get_common_fps() const
+    {
+        std::vector<int> common;
+        bool first = true;
+        for (auto&& kvp : fps_values_per_stream)
+        {
+            const auto& fps_group = kvp.second;
+            if (fps_group.empty())
+                continue;
+
+            if (first)
+            {
+                common = fps_group;
+                first = false;
+                continue;
+            }
+
+            // keep only the values from common that also appear in this stream's list
+            std::vector<int> updated;
+            for (auto fps : common)
+            {
+                if (std::find(fps_group.begin(), fps_group.end(), fps) != fps_group.end())
+                    updated.push_back(fps);
+            }
+            common = updated;
+        }
+        return common;
+    }
+
+    // A single shared FPS list can be presented only if all the streams share at least one
+    // common FPS value. We intersect the per-stream lists rather than testing a single value:
+    // the old check compared only one stream's extreme value (e.g. 90 or 5), which the others
+    // lack, and wrongly concluded there was no common FPS.
+    bool subdevice_model::is_there_common_fps()
+    {
+        return !get_common_fps().empty();
+    }
+
+    bool subdevice_model::draw_resolutions(std::string& error_message, std::string& label, std::function<void()> streaming_tooltip, float col0, float col1)
+    {
+        bool res = false;
+
+        // Draw combo-box with all resolution options for this device
+        auto res_chars = get_string_pointers(resolutions);
+        if (res_chars.size() > 0)
+        {
+            ImGui::Text("Resolution:");
+            streaming_tooltip();
+            ImGui::SameLine(); ImGui::SetCursorPosX(col1);
+
+            label = rsutils::string::from() << "##" << dev.get_info(RS2_CAMERA_INFO_NAME)
+                << s->get_info(RS2_CAMERA_INFO_NAME) << " resolution";
+
+            if (!allow_change_resolution_while_streaming && streaming)
+            {
+                ImGui::Text("%s", res_chars[ui.selected_res_id]);
+                streaming_tooltip();
+            }
+            else
+            {
+                ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x - 25 ); // Set the width for the combo box itself with a 25 buffer 
+                ImGui::PushStyleColor(ImGuiCol_TextSelectedBg, { 1,1,1,1 });
+                auto tmp_selected_res_id = ui.selected_res_id;
+                if (RsImGui::CustomComboBox(label.c_str(), &tmp_selected_res_id, res_chars.data(),
+                    static_cast<int>(res_chars.size())))
+                {
+                    res = true;
+                    _options_invalidated = true;
+
+                    ui.selected_res_id = tmp_selected_res_id;
+
+                }
+                ImGui::PopStyleColor();
+                ImGui::PopItemWidth();
+            }
+            ImGui::SetCursorPosX(col0);
+        }
+        return res;
+    }
+
+    bool subdevice_model::draw_fps(std::string& error_message, std::string& label, std::function<void()> streaming_tooltip, float col0, float col1)
+    {
+        bool res = false;
+        // FPS
+        if (show_single_fps_list)
+        {
+            auto fps_chars = get_string_pointers(shared_fpses);
+            ImGui::Text("Frame Rate (FPS):");
+            streaming_tooltip();
+            ImGui::SameLine(); ImGui::SetCursorPosX(col1);
+
+            label = rsutils::string::from()
+                << "##" << dev.get_info(RS2_CAMERA_INFO_NAME) << s->get_info(RS2_CAMERA_INFO_NAME) << " fps";
+
+            if (!allow_change_fps_while_streaming && streaming)
+            {
+                ImGui::Text("%s", fps_chars[ui.selected_shared_fps_id]);
+                streaming_tooltip();
+            }
+            else
+            {
+                ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x - 25); // Set the width for the combo box itself with a 25 buffer 
+                ImGui::PushStyleColor(ImGuiCol_TextSelectedBg, { 1,1,1,1 });
+                if (RsImGui::CustomComboBox(label.c_str(), &ui.selected_shared_fps_id, fps_chars.data(),
+                    static_cast<int>(fps_chars.size())))
+                {
+                    res = true;
+                }
+                ImGui::PopStyleColor();
+                ImGui::PopItemWidth();
+            }
+
+            ImGui::SetCursorPosX(col0);
+        }
+        return res;
+    }
+
+    bool subdevice_model::draw_streams_and_formats(std::string& error_message, std::string& label, std::function<void()> streaming_tooltip, float col0, float col1)
+    {
+        bool res = false;
+
+        if (!streaming)
+        {
+            ImGui::Text("Available Streams:");
+        }
+
+        // Draw combo-box with all format options for current device
+        for (auto&& f : formats)
+        {
+            // Format
+            if (f.second.size() == 0)
+                continue;
+
+            auto formats_chars = get_string_pointers(f.second);
+            if (!streaming || (streaming && stream_enabled[f.first]))
+            {
+                if (streaming)
+                {
+                    label = rsutils::string::from()
+                        << stream_display_names[f.first] << (show_single_fps_list ? "" : " stream:");
+                    ImGui::Text("%s", label.c_str());
+                    streaming_tooltip();
+                }
+                else
+                {
+                    auto tmp = stream_enabled;
+                    label = rsutils::string::from() << stream_display_names[f.first] << "##" << f.first;
+                    // Grey out streams invalid in the current D401 GMSL mode (see is_stream_mode_locked).
+                    const bool mode_locked = is_stream_mode_locked(f.first);
+                    if (mode_locked) ImGui::BeginDisabled();
+                    if (ImGui::Checkbox(label.c_str(), &stream_enabled[f.first]))
+                    {
+                        prev_stream_enabled = tmp;
+                        res = true;
+
+                        if (stream_enabled[f.first])
+                        {
+                            // D401 GMSL streams one mode at a time; reconcile the other streams.
+                            if( is_dual_color_subdevice() )
+                                enforce_dual_color_ir_exclusion(f.first);
+
+                            // Find the stream type for this unique_id
+                            rs2_stream stream_type = RS2_STREAM_ANY;
+                            for (auto& p : profiles)
+                            {
+                                if (p.unique_id() == f.first)
+                                {
+                                    stream_type = p.stream_type();
+                                    break;
+                                }
+                            }
+
+                            // If the currently selected resolution is not valid for the newly
+                            // enabled stream, auto-select the first resolution that is
+                            if (stream_type != RS2_STREAM_ANY)
+                            {
+                                auto it = resolutions_per_stream.find(stream_type);
+                                if (it != resolutions_per_stream.end() && !it->second.empty())
+                                {
+                                    auto& valid_res = it->second;
+                                    auto current_res = res_values[ui.selected_res_id];
+                                    bool valid = std::any_of(valid_res.begin(), valid_res.end(),
+                                        [&](const std::pair<int, int>& r) { return r == current_res; });
+                                    if (!valid)
+                                        select_resolution(valid_res[0].first, valid_res[0].second);
+                                }
+                            }
+                        }
+                    }
+                    if (mode_locked) ImGui::EndDisabled();
+                }
+            }
+
+            if (stream_enabled[f.first])
+            {
+                if (show_single_fps_list)
+                {
+                    ImGui::SameLine();
+                    ImGui::SetCursorPosX(col1);
+                }
+
+                label = rsutils::string::from()
+                    << "##" << dev.get_info(RS2_CAMERA_INFO_NAME) << s->get_info(RS2_CAMERA_INFO_NAME) << " "
+                    << f.first << " format";
+
+                if (!show_single_fps_list)
+                {
+                    ImGui::Text("Format:");
+                    streaming_tooltip();
+                    ImGui::SameLine(); ImGui::SetCursorPosX(col1);
+                }
+
+                if (streaming)
+                {
+                    ImGui::Text("%s", formats_chars[ui.selected_format_id[f.first]]);
+                    streaming_tooltip();
+                }
+                else
+                {
+                    ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x - 25); // Set the width for the combo box itself with a 25 buffer 
+                    ImGui::PushStyleColor(ImGuiCol_TextSelectedBg, { 1,1,1,1 });
+                    if (RsImGui::CustomComboBox(label.c_str(), &ui.selected_format_id[f.first], formats_chars.data(),
+                        static_cast<int>(formats_chars.size())))
+                    {
+                        // Setting Color 0 to an ISP format (non-RGB8) can't pair with raw Color 1; reconcile.
+                        if (is_dual_color_subdevice() && stream_enabled.count(f.first) && stream_enabled.at(f.first))
+                            enforce_dual_color_ir_exclusion(f.first);
+                    }
+                    ImGui::PopStyleColor();
+                    ImGui::PopItemWidth();
+                }
+                ImGui::SetCursorPosX(col0);
+                // FPS
+                // Draw combo-box with all FPS options for this device
+                if (!show_single_fps_list && !fpses_per_stream[f.first].empty() && stream_enabled[f.first])
+                {
+                    auto fps_chars = get_string_pointers(fpses_per_stream[f.first]);
+                    ImGui::Text("Frame Rate (FPS):");
+                    streaming_tooltip();
+                    ImGui::SameLine(); ImGui::SetCursorPosX(col1);
+
+                    label = rsutils::string::from() << "##" << s->get_info(RS2_CAMERA_INFO_NAME)
+                        << s->get_info(RS2_CAMERA_INFO_NAME) << f.first << " fps";
+
+                    if (streaming)
+                    {
+                        ImGui::Text("%s", fps_chars[ui.selected_fps_id[f.first]]);
+                        streaming_tooltip();
+                    }
+                    else
+                    {
+                        ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x - 25); // Set the width for the combo box itself with a 25 buffer 
+                        ImGui::PushStyleColor(ImGuiCol_TextSelectedBg, { 1,1,1,1 });
+                        RsImGui::CustomComboBox(label.c_str(), &ui.selected_fps_id[f.first], fps_chars.data(),
+                            static_cast<int>(fps_chars.size()));
+                        ImGui::PopStyleColor();
+                        ImGui::PopItemWidth();
+                    }
+                    ImGui::SetCursorPosX(col0);
+                }
+            }
+        }
+
+        return res;
+    }
+
+    int subdevice_model::get_res_id_in_resolutions_array(const std::vector<const char*>& res_chars, const std::pair<int, int>& res) const
+    {
+        int id = -1;
+        std::stringstream ss;
+        ss << res.first << "x" << res.second;
+        for (int i = 0; i < res_chars.size(); ++i)
+        {
+            auto cur_res = std::string(res_chars[i]);
+            if (cur_res == ss.str())
+            {
+                id = i;
+                break;
+            }
+        }
+        if (id == -1)
+            throw std::runtime_error("Multiple Resolution Issue, please check the requested resolution");
+
+        return id;
+    }
+
+    std::pair<int, int> subdevice_model::get_resolution_from_res_chars_id(const std::vector<const char*>& res_chars, int id_in_res_chars) const
+    {
+        std::string res_str = res_chars[id_in_res_chars];
+        std::pair<int, int> res;
+        auto width_str = res_str.substr(0, res_str.find('x'));
+        auto height_str = res_str.substr(res_str.find('x') + 1, res_str.size());
+        res.first = std::atoi(width_str.c_str());
+        res.second = std::atoi(height_str.c_str());
+
+        return res;
+    }
+
+    bool subdevice_model::draw_resolutions_combo_box_multiple_resolutions(std::string& error_message, std::string& label, std::function<void()> streaming_tooltip, float col0, float col1,
+        rs2_stream stream_type)
+    {
+        bool res = false;
+
+        auto res_pairs = resolutions_per_stream[stream_type];
+        std::vector<std::string> resolutions_str;
+        for (int i = 0; i < res_pairs.size(); ++i)
+        {
+            std::stringstream ss;
+            ss << res_pairs[i].first << "x" << res_pairs[i].second;
+            resolutions_str.push_back(ss.str());
+        }
+
+        auto res_chars = get_string_pointers(resolutions_str);
+
+        std::map<const char*, std::pair<int, std::pair<int, int>>> res_char_to_id_and_res;
+        for (int i = 0; i < res_chars.size(); ++i)
+        {
+            res_char_to_id_and_res[res_chars[i]] = std::make_pair(i, res_pairs[i]);
+        }
+        
+        if (res_chars.size() > 0)
+        {
+            if (!(streaming && !streaming_map[stream_type]))
+            {
+                // resolution
+                // Draw combo-box with all resolution options for this stream type
+                ImGui::Text("Resolution:");
+                streaming_tooltip();
+                ImGui::SameLine(); ImGui::SetCursorPosX(col1);
+
+                label = rsutils::string::from() << "##" << dev.get_info(RS2_CAMERA_INFO_NAME)
+                    << s->get_info(RS2_CAMERA_INFO_NAME) << " resolution for " << rs2_stream_to_string(stream_type);
+
+                int id_in_res_chars = get_res_id_in_resolutions_array(res_chars, ui.selected_stream_to_res[stream_type]);
+                if (!allow_change_resolution_while_streaming && streaming)
+                {
+                    ImGui::Text("%s", res_chars[id_in_res_chars]);
+                    streaming_tooltip();
+                }
+                else
+                {
+                    ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x - 25); // Set the width for the combo box itself with a 25 buffer 
+                    ImGui::PushStyleColor(ImGuiCol_TextSelectedBg, { 1,1,1,1 });
+                    auto tmp_selected_res = ui.selected_stream_to_res[stream_type];
+
+                    if (RsImGui::CustomComboBox(label.c_str(), &id_in_res_chars, res_chars.data(),
+                        static_cast<int>(res_chars.size())))
+                    {
+                        res = true;
+                        _options_invalidated = true;
+                        
+                        ui.selected_stream_to_res[stream_type] = get_resolution_from_res_chars_id(res_chars, id_in_res_chars);
+
+                    }
+                    ImGui::PopStyleColor();
+                    ImGui::PopItemWidth();
+                }
+            }
+            ImGui::SetCursorPosX(col0);
+        }
+
+        
+        return res;
+    }
+
+    bool subdevice_model::draw_formats_combo_box_multiple_resolutions(std::string& error_message, std::string& label, std::function<void()> streaming_tooltip, 
+        float col0, float col1, rs2_stream stream_type)
+    {
+        bool res = false;
+
+        for (auto&& f : formats)
+        {
+            if (f.second.size() == 0)
+                continue;
+
+            if (stream_type == RS2_STREAM_DEPTH && f.second[0] != std::string("Z16") ||
+                stream_type == RS2_STREAM_INFRARED && f.second[0] == std::string("Z16"))
+                continue;
+
+            auto formats_chars = get_string_pointers(f.second);
+            if (!streaming || (streaming && stream_enabled[f.first]))
+            {
+                if (streaming)
+                {
+                    label = rsutils::string::from()
+                        << stream_display_names[f.first] << (show_single_fps_list ? "" : " stream:");
+                    ImGui::Text("%s", label.c_str());
+                    streaming_tooltip();
+                }
+                else
+                {
+                    res = true;
+                    auto tmp = stream_enabled;
+                    label = rsutils::string::from() << stream_display_names[f.first] << "##" << f.first;
+                    const bool mode_locked = is_stream_mode_locked(f.first);
+                    if (mode_locked) ImGui::BeginDisabled();
+                    if (ImGui::Checkbox(label.c_str(), &stream_enabled[f.first]))
+                    {
+                        prev_stream_enabled = tmp;
+                        if (is_dual_color_subdevice() && stream_enabled.count(f.first) && stream_enabled.at(f.first))
+                            enforce_dual_color_ir_exclusion(f.first);
+                    }
+                    if (mode_locked) ImGui::EndDisabled();
+                }
+            }
+
+            if (stream_enabled[f.first])
+            {
+                if (show_single_fps_list)
+                {
+                    ImGui::SameLine();
+                    ImGui::SetCursorPosX(col1);
+                }
+
+                label = rsutils::string::from()
+                    << "##" << dev.get_info(RS2_CAMERA_INFO_NAME) << s->get_info(RS2_CAMERA_INFO_NAME) << " "
+                    << f.first << " format";
+
+                if (!show_single_fps_list)
+                {
+                    ImGui::Text("Format:");
+                    streaming_tooltip();
+                    ImGui::SameLine(); ImGui::SetCursorPosX(col1);
+                }
+
+                if (streaming)
+                {
+                    ImGui::Text("%s", formats_chars[ui.selected_format_id[f.first]]);
+                    streaming_tooltip();
+                }
+                else
+                {
+                    ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x - 25); // Set the width for the combo box itself with a 25 buffer 
+                    ImGui::PushStyleColor(ImGuiCol_TextSelectedBg, { 1,1,1,1 });
+                    if (RsImGui::CustomComboBox(label.c_str(), &ui.selected_format_id[f.first], formats_chars.data(),
+                        static_cast<int>(formats_chars.size())))
+                    {
+                        // Setting Color 0 to an ISP format (non-RGB8) can't pair with raw Color 1; reconcile.
+                        if (is_dual_color_subdevice() && stream_enabled.count(f.first) && stream_enabled.at(f.first))
+                            enforce_dual_color_ir_exclusion(f.first);
+                    }
+                    ImGui::PopStyleColor();
+                    ImGui::PopItemWidth();
+                }
+                ImGui::SetCursorPosX(col0);
+            }
+        }
+        return res;
+    }
+
+
+    bool subdevice_model::draw_res_stream_formats(std::string& error_message, std::string& label, std::function<void()> streaming_tooltip, float col0, float col1)
+    {
+        bool res = false;
+
+        std::vector<rs2_stream> relevant_streams = { RS2_STREAM_DEPTH, RS2_STREAM_INFRARED };
+        for (auto&& stream_type : relevant_streams)
+        {
+            // resolution
+            // Draw combo-box with all resolution options for this stream type
+            res |= draw_resolutions_combo_box_multiple_resolutions(error_message, label, streaming_tooltip, col0, col1, stream_type);
+
+            if (draw_streams_selector) 
+            {
+                // stream and formats
+                // Draw combo-box with all format options for current stream type
+                res |= draw_formats_combo_box_multiple_resolutions(error_message, label, streaming_tooltip, col0, col1, stream_type);
+            }
+        }
+
+        return res;
+    }
+    // The function returns true if one of the configuration parameters changed
+    bool subdevice_model::draw_stream_selection(std::string& error_message)
+    {
+        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 10);
+        bool res = false;
+
+        // The split depth/IR resolution UI only makes sense when the embedded decimation
+        // filter is ON; re-evaluate here so toggling the filter switches modes live.
+        refresh_multiple_resolutions_state();
+
+        std::string label = rsutils::string::from()
+            << "Stream Selection Columns##" << dev.get_info(RS2_CAMERA_INFO_NAME)
+            << s->get_info(RS2_CAMERA_INFO_NAME);
+
+        auto streaming_tooltip = [&]() {
+            if ((!allow_change_resolution_while_streaming && streaming)
+                && ImGui::IsItemHovered())
+                RsImGui::CustomTooltip("Can't modify while streaming");
+        };
+
+        auto col0 = ImGui::GetCursorPosX();
+        auto col1 = 9.f * (float)config_file::instance().get( configurations::window::font_size );
+
+        if (ui.is_multiple_resolutions)
+        {
+            if (draw_fps_selector)
+            {
+                res |= draw_fps(error_message, label, streaming_tooltip, col0, col1);
+            }
+
+            if (!streaming)
+            {
+                ImGui::Text("Available Streams:");
+            }
+
+            res |= draw_res_stream_formats(error_message, label, streaming_tooltip, col0, col1);
+        }
+        else
+        {
+            res |= draw_resolutions(error_message, label, streaming_tooltip, col0, col1);
+
+            if (draw_fps_selector)
+            {
+                res |= draw_fps(error_message, label, streaming_tooltip, col0, col1);
+            }
+
+            if (draw_streams_selector)
+            {
+                res |= draw_streams_and_formats(error_message, label, streaming_tooltip, col0, col1);
+            }
+        }
+
+        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 5);
+        return res;
+    }
+
+    bool subdevice_model::is_selected_combination_supported()
+    {
+        bool enforce_inter_stream_policies = false;
+        std::vector<stream_profile> results = get_selected_profiles(enforce_inter_stream_policies);
+
+        if (results.size() == 0)
+            return false;
+        // Verify that the number of found matches corrseponds to the number of the requested streams
+        // TODO - review whether the comparison can be made strict (==)
+        return results.size() >= size_t(std::count_if(stream_enabled.begin(), stream_enabled.end(), [](const std::pair<int, bool>& kpv)-> bool { return kpv.second == true; }));
+    }
+
+    void subdevice_model::update_ui(std::vector<stream_profile> profiles_vec)
+    {
+        if (profiles_vec.empty())
+            return;
+        for (auto& s : stream_enabled)
+            s.second = false;
+        for (auto& p : profiles_vec)
+        {
+            stream_enabled[p.unique_id()] = true;
+
+            // update format
+            auto format_vec = format_values[p.unique_id()];
+            for (int i = 0; i < format_vec.size(); i++)
+            {
+                if (format_vec[i] == p.format())
+                {
+                    ui.selected_format_id[p.unique_id()] = i;
+                    break;
+                }
+            }
+
+            // update resolution
+            if (!ui.is_multiple_resolutions)
+            {
+                for (int i = 0; i < res_values.size(); i++)
+                {
+                    if (auto vid_prof = p.as<video_stream_profile>())
+                        if (res_values[i].first == vid_prof.width() && res_values[i].second == vid_prof.height())
+                        {
+                            ui.selected_res_id = i;
+                            break;
+                        }
+                }
+            }
+            else
+            {
+                auto res_vec = resolutions_per_stream[p.stream_type()];
+                for (int i = 0; i < res_vec.size(); i++)
+                {
+                    if (auto vid_prof = p.as<video_stream_profile>())
+                        if (res_vec[i].first == vid_prof.width() && res_vec[i].second == vid_prof.height())
+                        {
+                            ui.selected_stream_to_res[p.stream_type()] = res_vec[i];
+                            break;
+                        }
+                }
+            }
+
+            // update fps
+            for (int i = 0; i < shared_fps_values.size(); i++)
+            {
+                if (shared_fps_values[i] == p.fps())
+                {
+                    ui.selected_shared_fps_id = i;
+                    break;
+                }
+            }
+        }
+        last_valid_ui = ui;
+        prev_stream_enabled = stream_enabled; // prev differs from curr only after user changes
+    }
+
+    template<typename T, typename V>
+    bool subdevice_model::check_profile(stream_profile p, T cond, std::map<V, std::map<int, stream_profile>>& profiles_map,
+        std::vector<stream_profile>& results, V key, int num_streams, stream_profile& def_p)
+    {
+        bool found = false;
+        if (auto vid_prof = p.as<video_stream_profile>())
+        {
+            for (auto& s : stream_enabled)
+            {
+                // find profiles that have an enabled stream and match the required condition
+                if (s.second == true && vid_prof.unique_id() == s.first && cond(vid_prof))
+                {
+                    profiles_map[key].insert(std::pair<int, stream_profile>(p.unique_id(), p));
+                    if (profiles_map[key].size() == num_streams)
+                    {
+                        results.clear(); // make sure only current profiles are saved
+                        for (auto& it : profiles_map[key])
+                            results.push_back(it.second);
+                        found = true;
+                    }
+                    else if (results.empty() && num_streams > 1 && profiles_map[key].size() == num_streams - 1)
+                    {
+                        for (auto& it : profiles_map[key])
+                            results.push_back(it.second);
+                    }
+                }
+                else if (!def_p.get() && cond(vid_prof))
+                    def_p = p; // in case no matching profile for current stream will be found, we'll use some profile that matches the condition
+            }
+        }
+        return found;
+    }
+
+
+    void subdevice_model::get_sorted_profiles(std::vector<stream_profile>& profiles)
+    {
+        auto fps = shared_fps_values[ui.selected_shared_fps_id];
+        int width = 0;
+        int height = 0;
+        std::vector<std::pair<int, int>> selected_resolutions;
+        if (!ui.is_multiple_resolutions)
+        {
+            width = res_values[ui.selected_res_id].first;
+            height = res_values[ui.selected_res_id].second;
+        }
+        else
+        {
+            for (auto it = resolutions_per_stream.begin(); it != resolutions_per_stream.end(); ++it)
+            {
+                selected_resolutions.push_back(ui.selected_stream_to_res[it->first]);
+            }
+        }
+        std::sort(profiles.begin(), profiles.end(), [&](stream_profile a, stream_profile b) {
+            int score_a = 0, score_b = 0;
+            if (a.fps() != fps)
+                score_a++;
+            if (b.fps() != fps)
+                score_b++;
+
+            if (a.format() != format_values[a.unique_id()][ui.selected_format_id[a.unique_id()]])
+                score_a++;
+            if (b.format() != format_values[b.unique_id()][ui.selected_format_id[b.unique_id()]])
+                score_b++;
+
+            auto a_vp = a.as<video_stream_profile>();
+            auto b_vp = a.as<video_stream_profile>();
+            if (!a_vp || !b_vp)
+                return score_a < score_b;
+
+            if (!ui.is_multiple_resolutions)
+            {
+                if (a_vp.width() != width || a_vp.height() != height)
+                    score_a++;
+                if (b_vp.width() != width || b_vp.height() != height)
+                    score_b++;
+            }
+            else
+            {
+                bool a_same_res_found = false;
+                bool b_same_res_found = false;
+                for (int i = 0; i < selected_resolutions.size(); ++i)
+                {
+                    if (a_vp.width() == selected_resolutions[i].first && a_vp.height() == selected_resolutions[i].second)
+                        a_same_res_found = true;
+                    if (b_vp.width() == selected_resolutions[i].first && b_vp.height() == selected_resolutions[i].second)
+                        b_same_res_found = true;
+                }
+                if (!a_same_res_found)
+                    score_a++;
+                if (!b_same_res_found)
+                    score_b++;
+            }
+
+            return score_a < score_b;
+            });
+    }
+
+    std::vector<stream_profile> subdevice_model::get_supported_profiles()
+    {
+        std::vector<stream_profile> results;
+        if (!show_single_fps_list || res_values.size() == 0)
+            return results;
+
+        int num_streams = 0;
+        for (auto& s : stream_enabled)
+            if (s.second == true)
+                num_streams++;
+        stream_profile def_p;
+        auto fps = shared_fps_values[ui.selected_shared_fps_id];
+        int width = 0;
+        int height = 0;
+        std::vector<std::pair<int, int>> selected_resolutions;
+        if (!ui.is_multiple_resolutions)
+        {
+            width = res_values[ui.selected_res_id].first;
+            height = res_values[ui.selected_res_id].second;
+        }
+        else
+        {
+            for (auto it = resolutions_per_stream.begin(); it != resolutions_per_stream.end(); ++it)
+            {
+                selected_resolutions.push_back(ui.selected_stream_to_res[it->first]);
+            }
+        }
+
+        std::vector<stream_profile> sorted_profiles = profiles;
+
+        if (!ui.is_multiple_resolutions && (ui.selected_res_id != last_valid_ui.selected_res_id))
+        {
+            get_sorted_profiles(sorted_profiles);
+            std::map<int, std::map<int, stream_profile>> profiles_by_fps;
+            for (auto&& p : sorted_profiles)
+            {
+                if (check_profile(p, [&](video_stream_profile vsp)
+                    { return (vsp.width() == width && vsp.height() == height); },
+                    profiles_by_fps, results, p.fps(), num_streams, def_p))
+                    break;
+            }
+        }
+        else if (ui.is_multiple_resolutions && (ui.selected_stream_to_res != last_valid_ui.selected_stream_to_res))
+        {
+            get_sorted_profiles(sorted_profiles);
+            std::map<int, std::map<int, stream_profile>> profiles_by_fps;
+            for (auto&& p : sorted_profiles)
+            {
+                if (check_profile(p, [&](video_stream_profile vsp)
+                    {
+                        bool res = false;
+                        std::pair<int, int> cur_res;
+                        if (p.stream_type() == RS2_STREAM_DEPTH)
+                            cur_res = selected_resolutions[0];
+                        else
+                            cur_res = selected_resolutions[1];
+                        return (vsp.width() == cur_res.first && vsp.height() == cur_res.second);
+                    },
+                    profiles_by_fps, results, p.fps(), num_streams, def_p))
+                    break;
+            }
+        }
+        else if (ui.selected_shared_fps_id != last_valid_ui.selected_shared_fps_id)
+        {
+            get_sorted_profiles(sorted_profiles);
+            std::map<std::tuple<int, int>, std::map<int, stream_profile>> profiles_by_res;
+
+            for (auto&& p : sorted_profiles)
+            {
+                if (auto vid_prof = p.as<video_stream_profile>())
+                {
+                    if (check_profile(p, [&](video_stream_profile vsp) { return (vsp.fps() == fps); },
+                        profiles_by_res, results, std::make_tuple(vid_prof.width(), vid_prof.height()), num_streams, def_p))
+                        break;
+                }
+            }
+        }
+        else if (ui.selected_format_id != last_valid_ui.selected_format_id)
+        {
+            if (num_streams == 0)
+            {
+                last_valid_ui = ui;
+                return results;
+            }
+            get_sorted_profiles(sorted_profiles);
+            std::vector<stream_profile> matching_profiles;
+            std::map<std::tuple<int, int, int>, std::map<int, stream_profile>> profiles_by_fps_res; //fps, width, height
+            rs2_format format;
+            int stream_id;
+            // find the stream to which the user made changes
+            for (auto& it : ui.selected_format_id)
+            {
+                if (stream_enabled[it.first])
+                {
+                    auto last_valid_it = last_valid_ui.selected_format_id.find(it.first);
+                    if ((last_valid_it == last_valid_ui.selected_format_id.end() || it.second != last_valid_it->second))
+                    {
+                        format = format_values[it.first][it.second];
+                        stream_id = it.first;
+                    }
+                }
+            }
+            for (auto&& p : sorted_profiles)
+            {
+                if (auto vid_prof = p.as<video_stream_profile>())
+                    if (p.unique_id() == stream_id && p.format() == format) // && stream_enabled[stream_id]
+                    {
+                        profiles_by_fps_res[std::make_tuple(p.fps(), vid_prof.width(), vid_prof.height())].insert(std::pair<int, stream_profile>(p.unique_id(), p));
+                        matching_profiles.push_back(p);
+                        if (!def_p.get())
+                            def_p = p;
+                    }
+            }
+            // take profiles not in matching_profiles with enabled stream and fps+resolution matching some profile in matching_profiles
+            for (auto&& p : sorted_profiles)
+            {
+                if (auto vid_prof = p.as<video_stream_profile>())
+                {
+                    if (check_profile(p, [&](stream_profile prof) { return (std::find_if(matching_profiles.begin(), matching_profiles.end(), [&](stream_profile sp)
+                        { return (stream_id != p.unique_id() && sp.fps() == p.fps() && sp.as<video_stream_profile>().width() == vid_prof.width() &&
+                            sp.as<video_stream_profile>().height() == vid_prof.height()); }) != matching_profiles.end()); },
+                        profiles_by_fps_res, results, std::make_tuple(p.fps(), vid_prof.width(), vid_prof.height()), num_streams, def_p))
+                        break;
+                }
+            }
+        }
+        else if (stream_enabled != prev_stream_enabled)
+        {
+            if (num_streams == 0)
+                return results;
+            get_sorted_profiles(sorted_profiles);
+            std::vector<stream_profile> matching_profiles;
+            std::map<rs2_format, std::map<int, stream_profile>> profiles_by_format;
+
+            for (auto&& p : sorted_profiles)
+            {
+                // first try to find profile from the new stream to match the current configuration
+                if (!ui.is_multiple_resolutions)
+                {
+                    if (check_profile(p, [&](video_stream_profile vid_prof)
+                        { return (p.fps() == fps && vid_prof.width() == width && vid_prof.height() == height); },
+                        profiles_by_format, results, p.format(), num_streams, def_p))
+                        break;
+                }
+                else
+                {
+                    if (check_profile(p, [&](video_stream_profile vid_prof)
+                        {
+                            bool res = false;
+                            for (int i = 0; i < selected_resolutions.size(); ++i)
+                            {
+                                auto cur_res = selected_resolutions[i];
+                                if (p.fps() == fps && vid_prof.width() == cur_res.first && vid_prof.height() == cur_res.second)
+                                {
+                                    res = true;
+                                    break;
+                                }
+                            }
+                            return res;
+                        },
+                        profiles_by_format, results, p.format(), num_streams, def_p))
+                        break;
+                }
+            }
+            if (results.size() < num_streams)
+            {
+                results.clear();
+                std::map<std::tuple<int, int, int>, std::map<int, stream_profile>> profiles_by_fps_res;
+                for (auto&& p : sorted_profiles)
+                {
+                    if (auto vid_prof = p.as<video_stream_profile>())
+                    {
+                        // if no stream with current configuration was found, try to find some configuration to match all enabled streams
+                        if (check_profile(p, [&](video_stream_profile vsp) { return true; }, profiles_by_fps_res, results,
+                            std::make_tuple(p.fps(), vid_prof.width(), vid_prof.height()), num_streams, def_p))
+                            break;
+                    }
+                }
+            }
+        }
+        if (results.empty())
+            results.push_back(def_p);
+        update_ui(results);
+        return results;
+    }
+
+    bool subdevice_model::is_ir_calibration_profile() const
+    {
+        // checking format
+        bool is_cal_format = false;
+        // checking that the SKU is D405 - otherwise, this method should return false
+        if (dev.supports(RS2_CAMERA_INFO_PRODUCT_ID) && !strcmp(dev.get_info(RS2_CAMERA_INFO_PRODUCT_ID), "0B5B"))
+        {
+            for (auto it = stream_enabled.begin(); it != stream_enabled.end(); ++it)
+            {
+                if (it->second)
+                {
+                    int selected_format_index = -1;
+                    if (ui.selected_format_id.count(it->first) > 0)
+                        selected_format_index = ui.selected_format_id.at(it->first);
+
+                    if (format_values.count(it->first) > 0 && selected_format_index > -1)
+                    {
+                        auto formats = format_values.at(it->first);
+                        if (formats.size() > selected_format_index)
+                        {
+                            auto format = formats[selected_format_index];
+                            if (format == RS2_FORMAT_Y16)
+                            {
+                                is_cal_format = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return is_cal_format;
+    }
+
+    bool subdevice_model::is_dual_color_subdevice() const
+    {
+        // The color<->IR imager conflict is specific to the D401 GMSL dual-RGB, where the two OV9782
+        // imagers each stream mono IR OR Bayer color (never both). Gate strictly on that product id
+        // (0xABCC == RS401_GMSL_PID, the same gate d400-device.cpp uses for the whole feature) so
+        // this stays a no-op on EVERY other camera -- standard D4xx (color on a separate sensor /
+        // single color) never reach the color>=2 check anyway, but the D500 dual-RGB (separate color
+        // sensors, 2 colors + stereo on one sensor) would, and it has no such imager conflict.
+        if (!dev.supports(RS2_CAMERA_INFO_PRODUCT_ID)
+            || std::string(dev.get_info(RS2_CAMERA_INFO_PRODUCT_ID)) != "ABCC")   // RS401_GMSL_PID
+            return false;
+
+        // Treat this as a dual-RGB subdevice only when it actually exposes a second color stream
+        // (Color 1) alongside the stereo streams. This mirrors exactly what the device registers:
+        // raw dual-RGB - and therefore Color 1 - is exposed only on firmware that supports it, so on
+        // older firmware there is a single color stream and this returns false (no Color 1, no raw
+        // color format, no color<->IR gating). Distinct color stream indices, not profile count, are
+        // what separate a real second color stream from the many format/resolution profiles of a
+        // single ISP color stream.
+        bool has_color0 = false, has_second_color = false, has_stereo = false;
+        for (auto&& p : profiles)
+        {
+            if (p.stream_type() == RS2_STREAM_COLOR)
+            {
+                if (p.stream_index() == 0) has_color0 = true;
+                else                       has_second_color = true;
+            }
+            else if (p.stream_type() == RS2_STREAM_INFRARED || p.stream_type() == RS2_STREAM_DEPTH)
+                has_stereo = true;
+        }
+        return has_color0 && has_second_color && has_stereo;
+    }
+
+    bool subdevice_model::color_uid_is_raw(int unique_id) const
+    {
+        // Pure format check: is this color stream currently set to RGB8. NOTE this alone does NOT mean
+        // "raw mode" - a lone Color 0 RGB8 is ISP color. Raw dual-RGB is decided by dual_rgb_active().
+        bool is_color = false;
+        for (auto&& p : profiles)
+            if (p.unique_id() == unique_id) { is_color = ( p.stream_type() == RS2_STREAM_COLOR ); break; }
+        if (!is_color)
+            return false;
+        auto fit = format_values.find(unique_id);
+        auto sit = ui.selected_format_id.find(unique_id);
+        if (fit == format_values.end() || sit == ui.selected_format_id.end())
+            return false;
+        int idx = sit->second;
+        if (idx < 0 || idx >= (int)fit->second.size())
+            return false;
+        return fit->second[idx] == RS2_FORMAT_RGB8;
+    }
+
+    rs2_stream subdevice_model::stream_type_of(int unique_id) const
+    {
+        for (auto&& p : profiles) if (p.unique_id() == unique_id) return p.stream_type();
+        return RS2_STREAM_ANY;
+    }
+
+    int subdevice_model::stream_index_of(int unique_id) const
+    {
+        for (auto&& p : profiles) if (p.unique_id() == unique_id) return p.stream_index();
+        return 0;
+    }
+
+    bool subdevice_model::dual_rgb_active() const
+    {
+        // Raw dual-RGB is active iff Color 1 (index >= 1) is enabled; a lone Color 0 (even RGB8) is ISP.
+        for (auto&& kv : stream_enabled)
+            if (kv.second && stream_type_of(kv.first) == RS2_STREAM_COLOR && stream_index_of(kv.first) >= 1)
+                return true;
+        return false;
+    }
+
+    void subdevice_model::enforce_dual_color_ir_exclusion(int changed_unique_id)
+    {
+        // Caller gates this on is_dual_color_subdevice(). Reconciles the single-mode invariant.
+        auto set_format = [this](int uid, rs2_format tgt)
+        {
+            auto fit = format_values.find(uid);
+            if (fit == format_values.end()) return;
+            for (int i = 0; i < (int)fit->second.size(); ++i)
+                if (fit->second[i] == tgt) { ui.selected_format_id[uid] = i; return; }
+        };
+        auto is_color = [this](int uid) { return stream_type_of(uid) == RS2_STREAM_COLOR; };
+        auto is_ir    = [this](int uid) { return stream_type_of(uid) == RS2_STREAM_INFRARED; };
+
+        rs2_stream ct = stream_type_of(changed_unique_id);
+        if (ct != RS2_STREAM_COLOR && ct != RS2_STREAM_INFRARED)
+            return;   // depth etc. - no mode effect
+
+        bool changed_on = stream_enabled.count(changed_unique_id) && stream_enabled[changed_unique_id];
+        if (!changed_on)
+            return;   // disabling a stream never forces another off
+
+        const bool changed_is_color = is_color(changed_unique_id);
+        const int  changed_index    = stream_index_of(changed_unique_id);
+
+        if (changed_is_color && changed_index >= 1)
+        {
+            // Enabling Color 1 -> raw dual-RGB: drop IR and force Color 0 to RGB8 (both pins must be raw).
+            for (auto& o : stream_enabled)
+            {
+                if (o.first == changed_unique_id || !o.second) continue;
+                if (is_ir(o.first))                                          o.second = false;
+                else if (is_color(o.first) && stream_index_of(o.first) == 0) set_format(o.first, RS2_FORMAT_RGB8);
+            }
+        }
+        else if (is_ir(changed_unique_id))
+        {
+            // Enabling IR -> ISP/stereo: drop the raw-only Color 1 (Color 0 stays; RGB8 there is now ISP).
+            for (auto& o : stream_enabled)
+            {
+                if (o.first == changed_unique_id || !o.second) continue;
+                if (is_color(o.first) && stream_index_of(o.first) >= 1)
+                    o.second = false;
+            }
+        }
+        else if (changed_is_color && changed_index == 0 && !color_uid_is_raw(changed_unique_id))
+        {
+            // Color 0 on an ISP format can't pair with raw Color 1: drop Color 1.
+            for (auto& o : stream_enabled)
+            {
+                if (o.first == changed_unique_id || !o.second) continue;
+                if (is_color(o.first) && stream_index_of(o.first) >= 1)
+                    o.second = false;
+            }
+        }
+    }
+
+    bool subdevice_model::is_stream_mode_locked(int unique_id) const
+    {
+        if (!is_dual_color_subdevice())
+            return false;
+
+        const bool raw_active = dual_rgb_active();          // Color 1 enabled => raw dual-RGB
+        bool ir_active = false;
+        for (auto&& kv : stream_enabled)
+        {
+            if (kv.second && stream_type_of(kv.first) == RS2_STREAM_INFRARED) { ir_active = true; break; }
+        }
+
+        rs2_stream t = stream_type_of(unique_id);
+        if (t == RS2_STREAM_INFRARED)
+            return raw_active;                              // IR unavailable while raw dual-RGB (Color 1) streams
+        if (t == RS2_STREAM_COLOR && stream_index_of(unique_id) >= 1)
+            return ir_active;                              // Color 1 (raw) unavailable while IR streams
+        return false;                                       // depth and Color 0 work in both modes - never lock
+    }
+
+    bool subdevice_model::is_depth_calibration_profile() const
+    {
+        // Check if D555 at depth resolution of 1280x800
+        std::string dev_name = "";
+        if( dev.supports( RS2_CAMERA_INFO_NAME ) )
+            dev_name = dev.get_info( RS2_CAMERA_INFO_NAME );
+
+        if( dev_name.find( "D555" ) != std::string::npos )
+        {
+            // More efficient to check resolution before format
+            if( ui.selected_res_id > 0 && res_values.size() > ui.selected_res_id &&  // Verify res_values is initialized
+                res_values[ui.selected_res_id].first == 1280 && res_values[ui.selected_res_id].second == 800 )
+            {
+                for( auto it = stream_enabled.begin(); it != stream_enabled.end(); ++it )
+                {
+                    if( it->second )
+                    {
+                        int selected_format_index = -1;
+                        if( ui.selected_format_id.count( it->first ) > 0 )
+                            selected_format_index = ui.selected_format_id.at( it->first );
+
+                        if( format_values.count( it->first ) > 0 && selected_format_index > -1 )
+                        {
+                            auto formats = format_values.at( it->first );
+                            if( formats.size() > selected_format_index )
+                            {
+                                auto format = formats[selected_format_index];
+                                if( format == RS2_FORMAT_Z16 )
+                                    return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
+    bool subdevice_model::is_multiple_resolutions_supported() const
+    {
+        if( ! dev.supports( RS2_CAMERA_INFO_PRODUCT_LINE ) || ! s->supports( RS2_CAMERA_INFO_NAME ) )
+            return false;
+        if( std::string( dev.get_info( RS2_CAMERA_INFO_PRODUCT_LINE ) ) != "D500" ) return false;
+        if( std::string( s->get_info( RS2_CAMERA_INFO_NAME ) ) != "Stereo Module" ) return false;
+
+        // D585S: FW-side decimation always on, option not exposed.
+        if( dev.supports( RS2_CAMERA_INFO_PRODUCT_ID )
+            && std::string( dev.get_info( RS2_CAMERA_INFO_PRODUCT_ID ) ) == "0B6B" )
+            return true;
+
+        // Other D500: show split UI only when the user-toggleable decimation is enabled.
+        // Read the cached is_enabled() (kept fresh via on_options_changed) so this stays
+        // cheap on the per-frame draw path.
+        for( auto & ef : embedded_filters )
+        {
+            auto filter = ef->get_filter();
+            if( ! filter || filter->get_type() != RS2_EMBEDDED_FILTER_TYPE_DECIMATION )
+                continue;
+            // Filter present without the ENABLED option => permanently on in FW.
+            if( ! filter->supports( RS2_OPTION_EMBEDDED_FILTER_ENABLED ) )
+                return true;
+            return ef->is_enabled();
+        }
+        return false;
+    }
+
+    void subdevice_model::refresh_multiple_resolutions_state()
+    {
+        const bool desired = is_multiple_resolutions_supported();
+        if( desired == ui.is_multiple_resolutions ) return;
+        // Don't toggle the mode mid-stream — the streaming pipeline was configured with
+        // the current selection layout. It will re-sync on the next stop/start.
+        if( streaming ) return;
+
+        if( desired )
+        {
+            // Switching ON: seed the per-stream map from the current single-resolution
+            // selection, then force the FW-mandated decimation defaults (depth 640x360,
+            // IR 1280x720) so the combo boxes land on values the pipeline will accept.
+            std::pair< int, int > current_res{ 0, 0 };
+            if( ui.selected_res_id >= 0 && ui.selected_res_id < static_cast< int >( res_values.size() ) )
+                current_res = res_values[ui.selected_res_id];
+
+            for( auto & res_array : resolutions_per_stream )
+            {
+                auto & options = res_array.second;
+                if( options.empty() )
+                    continue;
+                auto it = std::find( options.begin(), options.end(), current_res );
+                ui.selected_stream_to_res[res_array.first] = ( it != options.end() ) ? *it : options.back();
+            }
+            apply_decimation_resolution_defaults();
+        }
+        else
+        {
+            // Switching OFF: map depth's per-stream resolution back into res_values, so the
+            // single-resolution combo lands on the same choice the user was seeing.
+            std::pair< int, int > target{ 0, 0 };
+            auto it = ui.selected_stream_to_res.find( RS2_STREAM_DEPTH );
+            if( it != ui.selected_stream_to_res.end() )
+                target = it->second;
+
+            int idx = -1;
+            for( int i = 0; i < static_cast< int >( res_values.size() ); ++i )
+            {
+                if( res_values[i] == target ) { idx = i; break; }
+            }
+            if( idx < 0 && ! res_values.empty() )
+                idx = static_cast< int >( res_values.size() ) - 1;
+            ui.selected_res_id = idx;
+        }
+
+        ui.is_multiple_resolutions = desired;
+        last_valid_ui = ui;
+    }
+
+    void subdevice_model::apply_decimation_resolution_defaults()
+    {
+        // Viewer-only convenience for the split-resolution UI: the embedded decimation
+        // filter (FW-side) only accepts depth at 640x360 and pairs it with IR at 1280x720.
+        // Landing the combo boxes on these values here avoids the streaming-time error
+        // in avoid_streaming_on_embedded_filters_not_matching_configuration().
+        static const std::pair< int, int > DEPTH_RES{ 640, 360 };
+        static const std::pair< int, int > IR_RES{ 1280, 720 };
+
+        auto force = [&]( rs2_stream stream, const std::pair< int, int > & res ) {
+            auto it = resolutions_per_stream.find( stream );
+            if( it == resolutions_per_stream.end() ) return;
+            auto & options = it->second;
+            if( std::find( options.begin(), options.end(), res ) == options.end() ) return;
+            ui.selected_stream_to_res[stream] = res;
+        };
+        force( RS2_STREAM_DEPTH, DEPTH_RES );
+        force( RS2_STREAM_INFRARED, IR_RES );
+    }
+
+    std::pair<int, int> subdevice_model::get_max_resolution(rs2_stream stream) const
+    {
+        if (resolutions_per_stream.count(stream) > 0)
+            return resolutions_per_stream.at(stream).back();
+
+        std::stringstream error_message;
+        error_message << "The stream ";
+        error_message << rs2_stream_to_string(stream);
+        error_message << " is not available with this sensor ";
+        error_message << s->get_info(RS2_CAMERA_INFO_NAME);
+        throw std::runtime_error(error_message.str());
+    }
+
+    void subdevice_model::select_resolution( int width, int height, rs2_stream stream )
+    {
+        if( ui.is_multiple_resolutions )
+        {
+            // (0, 0) indicates keep current resolution
+            if( width != 0 && height != 0 && stream != RS2_STREAM_ANY )
+                ui.selected_stream_to_res[stream] = { width, height };
+        }
+        else
+        {
+            for( int i = 0; i < res_values.size(); i++ )
+            {
+                auto kvp = res_values[i];
+                if( kvp.first == width && kvp.second == height )
+                    ui.selected_res_id = i;
+            }
+        }
+    }
+
+    std::vector<stream_profile> subdevice_model::get_selected_profiles(bool enforce_inter_stream_policies)
+    {
+        std::vector<stream_profile> results;
+
+        std::stringstream error_message;
+        error_message << "The profile ";
+
+        bool is_cal_profile = is_ir_calibration_profile();
+
+        for (auto&& f : formats)
+        {
+            auto stream = f.first;
+            if (stream_enabled[stream])
+            {
+                auto format = format_values[stream][ui.selected_format_id[stream]];
+
+                auto fps = 0;
+                if (show_single_fps_list)
+                    fps = shared_fps_values[ui.selected_shared_fps_id];
+                else
+                    fps = fps_values_per_stream[stream][ui.selected_fps_id[stream]];
+
+                for (auto&& p : profiles)
+                {
+                    if (auto vid_prof = p.as<video_stream_profile>())
+                    {
+                        if (res_values.size() > 0)
+                        {
+                            int width = 0;
+                            int height = 0;
+                            std::map<rs2_stream, std::pair<int, int>> stream_to_selected_resolution;
+                            if (!ui.is_multiple_resolutions)
+                            {
+                                width = res_values[ui.selected_res_id].first;
+                                height = res_values[ui.selected_res_id].second;
+                                error_message << "\n{" << stream_display_names[stream] << ","
+                                    << width << "x" << height << " at " << fps << "Hz, "
+                                    << rs2_format_to_string(format) << "} ";
+                            }
+                            else
+                            {
+                                stream_to_selected_resolution[p.stream_type()] = ui.selected_stream_to_res[p.stream_type()];
+  
+                                error_message << "\n{" << stream_display_names[stream] << ","
+                                    << stream_to_selected_resolution[p.stream_type()].first << "x" 
+                                    << stream_to_selected_resolution[p.stream_type()].second << " at " << fps << "Hz, "
+                                    << rs2_format_to_string(format) << "} ";
+                            }
+
+                            if (p.unique_id() == stream && p.fps() == fps && p.format() == format)
+                            {
+                                // permitting to add color stream profile to depth sensor
+                                // when infrared calibration is active
+                                if (is_cal_profile && p.stream_type() == RS2_STREAM_COLOR)
+                                {
+                                    auto max_color_res = get_max_resolution(RS2_STREAM_COLOR);
+                                    if (vid_prof.width() == max_color_res.first && vid_prof.height() == max_color_res.second)
+                                        results.push_back(p);
+                                }
+                                else
+                                {
+                                    if (!ui.is_multiple_resolutions)
+                                    {
+                                        if (vid_prof.width() == width && vid_prof.height() == height)
+                                            results.push_back(p);
+                                    }
+                                    else
+                                    {
+                                        std::pair<int, int> cur_res;
+                                        cur_res = stream_to_selected_resolution[p.stream_type()];
+                                        if (vid_prof.width() == cur_res.first && vid_prof.height() == cur_res.second)
+                                            results.push_back(p);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        error_message << "\n{" << stream_display_names[stream] << ", at " << fps << "Hz, "
+                            << rs2_format_to_string(format) << "} ";
+
+                        if (p.fps() == fps &&
+                            p.unique_id() == stream &&
+                            p.format() == format)
+                            results.push_back(p);
+                    }
+                }
+            }
+        }
+        if (results.size() == 0 && enforce_inter_stream_policies)
+        {
+            error_message << " is unsupported!";
+            throw std::runtime_error(error_message.str());
+        }
+        return results;
+    }
+
+    // Move-and-wait pattern: the first caller that enters takes ownership of the
+    // future via std::move, so a concurrent second caller sees an invalid future
+    // and returns immediately.  All current call sites (destructor, play(),
+    // fw-update) are mutually exclusive flows, so at most one thread waits on
+    // the background stop at any given time.
+    //
+    // NOTE: exceptions from the background stop propagate through the future
+    // and are re-thrown here.  Callers that must not throw (e.g. destructor)
+    // are responsible for their own try/catch around this call.
+    void subdevice_model::wait_for_stop()
+    {
+        std::future< void > local;
+        {
+            std::lock_guard< std::mutex > lock(_stop_mutex);
+            local = std::move(_stop_future);
+        }
+        if (local.valid())
+            local.get();
+    }
+
+    void subdevice_model::stop(std::shared_ptr<notifications_model> not_model)
+    {
+        if (not_model)
+            not_model->add_log("Stopping streaming");
+
+        // --- Immediate UI state (synchronous) ---
+        streaming = false;
+        _pause = false;
+
+        if (ui.is_multiple_resolutions)
+        {
+            streaming_map[RS2_STREAM_DEPTH] = false;
+            streaming_map[RS2_STREAM_INFRARED] = false;
+        }
+
+        if (profiles[0].stream_type() == RS2_STREAM_COLOR)
+        {
+            std::lock_guard< std::mutex > lock(detected_objects->mutex);
+            detected_objects->clear();
+            detected_objects->sensor_is_on = false;
+        }
+        else if (profiles[0].stream_type() == RS2_STREAM_DEPTH)
+        {
+            viewer.disable_measurements();
+        }
+
+        // --- Heavy operations (background) ---
+        // Chain with any prior pending stop without blocking the caller:
+        // move the old future into the lambda so it waits internally.
+        std::lock_guard< std::mutex > lock(_stop_mutex);
+        auto prev_stop = std::move(_stop_future);
+
+        auto sensor_ptr = s;
+        _stop_future = std::async(std::launch::async, [this, sensor_ptr, prev_stop = std::move(prev_stop)]() mutable
+            {
+                if (prev_stop.valid())
+                    prev_stop.get();
+
+                sensor_ptr->stop();
+
+                queues.foreach([&](frame_queue& q)
+                    {
+                        frame f;
+                        while (q.poll_for_frame(&f));
+                    });
+
+                sensor_ptr->close();
+
+                // Invalidate after close() so options whose read-only depends on is_opened() refresh correctly.
+                _options_invalidated = true;
+            });
+    }
+
+    bool subdevice_model::is_paused() const
+    {
+        return _pause.load();
+    }
+
+    void subdevice_model::pause()
+    {
+        _pause = true;
+        auto playback_dev = dev.as<rs2::playback>();
+        if (playback_dev && playback_dev.current_status() == RS2_PLAYBACK_STATUS_PLAYING)
+        {
+            playback_dev.pause();
+        }
+    }
+
+    void subdevice_model::resume()
+    {
+        _pause = false;
+        auto playback_dev = dev.as<rs2::playback>();
+        if (playback_dev && playback_dev.current_status() == RS2_PLAYBACK_STATUS_PAUSED)
+        {
+            playback_dev.resume();
+        }
+    }
+
+    //The function decides if specific frame should be sent to the syncer
+    bool subdevice_model::is_synchronized_frame(viewer_model& viewer, const frame& f)
+    {
+        if (!viewer.is_3d_view || viewer.is_3d_depth_source(f) || viewer.is_3d_texture_source(f))
+            return true;
+
+        return false;
+    }
+
+    void subdevice_model::avoid_streaming_on_embedded_filters_not_matching_configuration() const
+    {
+        // check if sensor is depth
+        // check if embedded decimation filter is ON
+        // check if reolution is different from 640 X 360
+        if (s->is<depth_sensor>())
+            {
+            auto current_depth_sensor = s->as<depth_sensor>();
+
+            std::shared_ptr<embedded_filter_model> embedded_decimation = nullptr;
+            for (auto& ef : embedded_filters)
+            {
+                if (ef->get_filter()->get_type() == RS2_EMBEDDED_FILTER_TYPE_DECIMATION)
+                {
+                    embedded_decimation = ef;
+                    break;
+                }
+            }
+            if (embedded_decimation &&
+                embedded_decimation->get_filter()->get_option(RS2_OPTION_EMBEDDED_FILTER_ENABLED))
+            {
+                // check if resolution is different from 640 X 360
+                int width = 0;
+                int height = 0;
+                if (!ui.is_multiple_resolutions)
+                {
+                    width = res_values[ui.selected_res_id].first;
+                    height = res_values[ui.selected_res_id].second;
+                }
+                else
+                {
+                    auto res_pair = ui.selected_stream_to_res.at(RS2_STREAM_DEPTH);
+                    width = res_pair.first;
+                    height = res_pair.second;
+                }
+                if (width != 640 || height != 360)
+                {
+                    throw std::runtime_error("Cannot start streaming: Embedded Decimation filter to be used only with resolution 640x360.");
+                }
+            }
+        }
+    }
+
+    void subdevice_model::play(const std::vector<stream_profile>& profiles, viewer_model& viewer, std::shared_ptr<rs2::asynchronous_syncer> syncer)
+    {
+        wait_for_stop();
+        avoid_streaming_on_embedded_filters_not_matching_configuration();
+        set_extrinsics_from_depth_if_needed();
+
+        std::stringstream ss;
+        ss << "Starting streaming of ";
+        for (size_t i = 0; i < profiles.size(); i++)
+        {
+            ss << profiles[i].stream_type();
+            if (i < profiles.size() - 1) ss << ", ";
+        }
+        ss << "...";
+        viewer.not_model->add_log(ss.str());
+
+        s->open(profiles);
+        try {
+            s->start([&, syncer](frame f)
+                {
+                    // The condition here must match the condition inside render_loop()!
+                    if (viewer.synchronization_enable)
+                    {
+                        syncer->invoke(f);
+                    }
+                    else
+                    {
+                        auto id = f.get_profile().unique_id();
+                        viewer.ppf.frames_queue[id].enqueue(f);
+
+                        on_frame();
+                    }
+                });
+        }
+
+        catch (...)
+        {
+            s->close();
+            throw;
+        }
+
+        _options_invalidated = true;
+        streaming = true;
+
+        if (ui.is_multiple_resolutions)
+        {
+            for (size_t i = 0; i < profiles.size(); i++)
+            {
+                streaming_map[profiles[i].stream_type()] = true;
+            }
+        }
+
+        if (s->is< color_sensor >())
+        {
+            std::lock_guard< std::mutex > lock(detected_objects->mutex);
+            detected_objects->sensor_is_on = true;
+        }
+    }
+    void subdevice_model::update(std::string& error_message, notifications_model& notifications)
+    {
+        // Two paths below are throttled while the user is actively writing options
+        // (last_user_set_stopwatch < 500 ms):
+        //   - the _options_invalidated branch posts a JSON-config save job, which is
+        //     fine to skip during a drag (the worker coalesces anyway).
+        //   - the per-frame get_option_value() polling shares the per-device USB bus
+        //     with our async option-write worker and with options_watcher's 1 s poll
+        //     cycle, so polling here would reintroduce the UI freeze the async dispatch
+        //     is meant to fix.
+        // The gate is scoped to just these two paths so that any other logic added to
+        // update() in the future (or below this point) is not silently throttled.
+        // `value` stays fresh during the gate via options_watcher -> on_options_changed.
+        const bool user_writing = last_user_set_stopwatch.get_elapsed_ms() < 500;
+
+        if (!user_writing && _options_invalidated)
+        {
+            next_option = 0;
+            _options_invalidated = false;
+
+            // Capture by value so the worker stays UAF-safe even if `this` dies mid-save.
+            // shared_ptrs keep the underlying processing blocks alive until the job runs.
+            auto colorizer = depth_colorizer;
+            auto yuy2      = yuy2rgb;
+            auto m420      = m420_to_rgb;
+            auto nv12      = nv12_to_rgb;
+            auto y411_ptr  = y411;
+            auto pp        = post_processing;
+            config_save_worker::instance().post( this,
+                [ colorizer, yuy2, m420, nv12, y411_ptr, pp ]
+                {
+                    save_processing_block_to_config_file( "colorizer",   colorizer );
+                    save_processing_block_to_config_file( "yuy2rgb",     yuy2 );
+                    save_processing_block_to_config_file( "m420_to_rgb", m420 );
+                    save_processing_block_to_config_file( "nv12_to_rgb", nv12 );
+                    save_processing_block_to_config_file( "y411",        y411_ptr );
+                    for( auto & pbm : pp ) pbm->save_to_config_file();
+                } );
+        }
+
+        if (!user_writing && next_option < supported_options.size())
+        {
+            auto next = supported_options[next_option];
+            if (options_metadata.find(static_cast<rs2_option>(next)) != options_metadata.end())
+            {
+                auto& opt_md = options_metadata.at(static_cast<rs2_option>(next));
+                opt_md.update_all_fields(error_message, notifications);
+
+                if (next == RS2_OPTION_ENABLE_AUTO_EXPOSURE)
+                {
+                    auto old_ae_enabled = auto_exposure_enabled;
+                    auto_exposure_enabled = opt_md.value_as_float() > 0;
+
+                    if (!old_ae_enabled && auto_exposure_enabled)
+                    {
+                        try
+                        {
+                            if (s->is<roi_sensor>())
+                            {
+                                auto r = s->as<roi_sensor>().get_region_of_interest();
+                                roi_rect.x = static_cast<float>(r.min_x);
+                                roi_rect.y = static_cast<float>(r.min_y);
+                                roi_rect.w = static_cast<float>(r.max_x - r.min_x);
+                                roi_rect.h = static_cast<float>(r.max_y - r.min_y);
+                            }
+                        }
+                        catch (...)
+                        {
+                            auto_exposure_enabled = false;
+                        }
+                    }
+                }
+
+                if (next == RS2_OPTION_DEPTH_UNITS)
+                {
+                    opt_md.dev->depth_units = opt_md.value_as_float();
+                }
+
+                if (next == RS2_OPTION_STEREO_BASELINE)
+                    opt_md.dev->stereo_baseline = opt_md.value_as_float();
+            }
+
+            next_option++;
+        }
+    }
+
+    void subdevice_model::draw_options(const std::vector<rs2_option>& drawing_order,
+        bool update_read_only_options, std::string& error_message,
+        notifications_model& notifications)
+    {
+        for (auto& opt : drawing_order)
+        {
+            draw_option(opt, update_read_only_options, error_message, notifications);
+        }
+
+        for (auto i = 0; i < RS2_OPTION_COUNT; i++)
+        {
+            auto opt = static_cast<rs2_option>(i);
+            if (viewer.is_option_skipped(opt)) continue;
+            if (std::find(drawing_order.begin(), drawing_order.end(), opt) == drawing_order.end())
+            {
+                draw_option(opt, update_read_only_options, error_message, notifications);
+            }
+        }
+    }
+
+    uint64_t subdevice_model::num_supported_non_default_options() const
+    {
+        return (uint64_t)std::count_if(
+            std::begin(options_metadata),
+            std::end(options_metadata),
+            [&](const std::pair<int, option_model>& p) {return p.second.supported && !viewer.is_option_skipped(p.second.opt); });
+    }
+
+    bool subdevice_model::supports_on_chip_calib()
+    {
+        bool is_d400 = s->supports(RS2_CAMERA_INFO_PRODUCT_LINE) ?
+            std::string(s->get_info(RS2_CAMERA_INFO_PRODUCT_LINE)) == "D400" : false;
+        std::string fw_version = s->supports(RS2_CAMERA_INFO_FIRMWARE_VERSION) ?
+            s->get_info(RS2_CAMERA_INFO_FIRMWARE_VERSION) : "";
+        bool supported_fw = s->supports(RS2_CAMERA_INFO_FIRMWARE_VERSION) ?
+            is_upgradeable("05.11.12.0", fw_version) : false;
+        bool d400_on_chip_calib_supported = s->is<rs2::depth_sensor>() && is_d400 && supported_fw;
+
+        bool is_d500 = s->supports(RS2_CAMERA_INFO_PRODUCT_LINE) ?
+            std::string(s->get_info(RS2_CAMERA_INFO_PRODUCT_LINE)) == "D500" : false;
+        bool is_depth_sensor = s->supports(RS2_CAMERA_INFO_NAME) ?
+            std::string(s->get_info(RS2_CAMERA_INFO_NAME)) == "Stereo Module" : false;
+        bool d500_on_chip_calib_supported = is_depth_sensor && is_d500;
+
+        return d400_on_chip_calib_supported || d500_on_chip_calib_supported;
+    }
+
+    void subdevice_model::set_extrinsics_from_depth_if_needed()
+    {
+        std::string pid = dev.get_info(RS2_CAMERA_INFO_PRODUCT_ID);
+        std::string sensor_name = s->get_info(RS2_CAMERA_INFO_NAME);
+        if (pid == "0B6B" && sensor_name == "Depth Mapping Camera")
+        {
+            //_labeled_point_cloud_to_depth_extrinsics
+            stream_profile depth_profile;
+
+            auto depth_sensor = dev.first<rs2::depth_sensor>();
+            auto profiles = depth_sensor.get_stream_profiles();
+            for (auto&& p : profiles)
+            {
+                if (p.stream_type() == RS2_STREAM_DEPTH)
+                {
+                    depth_profile = p;
+                    break;
+                }
+            }
+            stream_profile lpc_profile;
+            profiles = s->get_stream_profiles();
+            for (auto&& p : profiles)
+            {
+                if (p.stream_type() == RS2_STREAM_LABELED_POINT_CLOUD)
+                {
+                    lpc_profile = p;
+                    break;
+                }
+            }
+            if (depth_profile && lpc_profile)
+                _extrinsics_from_depth = depth_profile.get_extrinsics_to(lpc_profile);
+        }
+    }
+
+    bool subdevice_model::hide_resolutions(const stream_profile& profile) const
+    {
+        if (s->supports(RS2_CAMERA_INFO_NAME) &&
+            s->get_info(RS2_CAMERA_INFO_NAME) == std::string("Depth Mapping Camera"))
+        {
+            if (auto vid_prof = profile.as<video_stream_profile>())
+            {
+                int width = vid_prof.width();
+                int height = vid_prof.height();
+
+                if ((width == 2880 && height == 32) || (width == 128 && height == 128))
+                    return true;
+            }
+        }
+        return false;
+    }
+}

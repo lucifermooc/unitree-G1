@@ -1,0 +1,5 @@
+uint32 id
+string data_type
+---
+bool success
+nav_msgs/Path message

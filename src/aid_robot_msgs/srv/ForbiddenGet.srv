@@ -1,0 +1,5 @@
+uint32 map_id
+---
+bool success
+string message
+StartToEndPoint[] lines
