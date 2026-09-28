@@ -36,7 +36,7 @@ TurtleBot3 仿真里跑通：Cartographer 建图 → Cartographer 纯定位 + Na
 1. 在用户电脑上运行 `bash setup.sh`，修掉遇到的报错（国内网络：Docker 镜像加速、`HF_ENDPOINT=https://hf-mirror.com`）。
 2. 换成真实地点后，同步改 `data/eval_queries.json`，运行 `python evaluate.py` 重新确定 `SCORE_THRESHOLD`。
 3. 问清 G1 用的导航/定位系统（ROS2 + Nav2？宇树自带？），然后：
-   - 写标注工具：机器人站到某处 → 输入 title/description → 自动读取当前位姿，追加到 `data/semantic_map.json`；
+   - 标注地点：用 `label_tool.py` 在网页地图上点选（已完成、已在仿真验证）；
    - 导航对接：如果 G1 用 Nav2，直接用 `semantic_map/semantic_nav.py`（仿真已验证）；否则参考其中的 `goal_to_pose()` 适配。
 4. 用 G1 建图后标注的真实坐标，替换 `data/semantic_map.json` 里编造的 8 个示例点。
 5. 部署到 Thor（见 README 最后一节）。
