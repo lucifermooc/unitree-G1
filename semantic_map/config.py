@@ -19,5 +19,6 @@ VECTOR_SIZE = 1024  # BGE-M3 dense 向量固定 1024 维
 USE_FP16 = os.getenv("USE_FP16", "0") == "1"
 
 # 相似度低于这个分数就认为"没找到"，防止随便一句话机器人也乱跑。
-# 0.45 是初始值，用自己的数据实测后再调。
-SCORE_THRESHOLD = float(os.getenv("SCORE_THRESHOLD", "0.45"))
+# 0.52 是用示例数据 + data/eval_queries.json 实测得出的（BGE-M3 下：相关句子最低约 0.54，
+# 无关句子大多在 0.37~0.50）。换成自己的地点后运行 python evaluate.py 重新确定。
+SCORE_THRESHOLD = float(os.getenv("SCORE_THRESHOLD", "0.52"))
