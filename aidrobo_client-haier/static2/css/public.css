@@ -1,0 +1,58 @@
+.tooldetails {
+  position: absolute;
+  width: 90%;
+  height: 80%;
+  top: 20px;
+  left: 5%;
+  display: flex;
+  align-items: center;
+  justify-content: space-evenly;
+  flex-flow: column;
+  background: #47548d;
+  border-radius: 4px;
+  color: #fff;
+}
+.toolH {
+  display: flex;
+  position: absolute;
+  top: 4px;
+  align-items: center;
+  justify-content: space-between;
+  width: 80%;
+  font-size: 1rem;
+}
+.toolT {
+  display: flex;
+  align-items: center;
+}
+.toolT img {
+  margin-right: 0.25rem;
+}
+.toolC {
+  font-size: 2rem;
+}
+.anomaly_click {
+  width: 150px;
+  height: 50px;
+  text-align: center;
+  line-height: 50px;
+  background: #0cd4af;
+  border: 1px solid #948f8f;
+  color: #fff;
+  border-radius: 11px;
+}
+.anomaly {
+  width: 150px;
+  height: 50px;
+  text-align: center;
+  line-height: 50px;
+  border: 1px solid #948f8f;
+  background: #d9dbdb;
+  color: #000;
+  border-radius: 11px;
+}
+.toolBtn {
+  background: #4e87ec;
+  padding: 0.75rem 1rem;
+  border-radius: 4px;
+}
