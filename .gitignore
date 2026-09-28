@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 .venv/
 semantic_map/qdrant_storage/
+sim/logs/
