@@ -1,0 +1,97 @@
+@font-face {
+  font-family: 'icomoon';
+  src:  url('fonts/icomoon.eot?svr2pb');
+  src:  url('fonts/icomoon.eot?svr2pb#iefix') format('embedded-opentype'),
+    url('fonts/icomoon.ttf?svr2pb') format('truetype'),
+    url('fonts/icomoon.woff?svr2pb') format('woff'),
+    url('fonts/icomoon.svg?svr2pb#icomoon') format('svg');
+  font-weight: normal;
+  font-style: normal;
+}
+
+[class^="icon-"], [class*=" icon-"] {
+  /* use !important to prevent issues with browser extensions that change fonts */
+  font-family: 'icomoon' !important;
+  speak: none;
+  font-style: normal;
+  font-weight: normal;
+  font-variant: normal;
+  text-transform: none;
+  line-height: 1;
+
+  /* Better Font Rendering =========== */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.icon-hand-stop:before {
+  content: "\e900";
+}
+.icon-amplification:before {
+  content: "\e908";
+  color: #fff;
+}
+.icon-anastole:before {
+  content: "\e901";
+  color:#FFA86A;
+}
+.icon-charge:before {
+  content: "\e902";
+}
+.icon-compass .path1:before {
+  content: "\e903";
+  color: rgb(238, 67, 84);
+}
+.icon-compass .path2:before {
+  content: "\e904";
+  margin-left: -0.2353515625em;
+  color: rgb(0, 159, 251);
+}
+.icon-compass .path3:before {
+  content: "\e905";
+  margin-left: -0.2353515625em;
+  color: rgb(255, 255, 255);
+}
+.icon-compass .path4:before {
+  content: "\e906";
+  margin-left: -0.2353515625em;
+  color: rgb(255, 255, 255);
+}
+.icon-dispose:before {
+  content: "\e907";
+}
+.icon-patrol:before {
+  content: "\e90a";
+}
+.icon-robot52:before {
+  content: "\e90b";
+}
+.icon-rotate:before {
+  content: "\e90c";
+  color: #4d4d4d;
+}
+.icon-rubber:before {
+  content: "\e90d";
+}
+.icon-updown:before {
+  content: "\e90e";
+  color: #FFA86A;
+}
+.icon-book:before {
+  content: "\e91f";
+}
+.icon-undo2:before {
+  content: "\e967";
+}
+.icon-redo2:before {
+  content: "\e968";
+}
+.icon-zoom-in:before {
+  content: "\e987";
+  color: #FFA86A;
+
+}
+.icon-zoom-out:before {
+  content: "\e988";
+  color: #FFA86A;
+}

@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<svg version="1.1" id="radar-calibration" xmlns="http://www.w3.org/2000/svg" x="0px" y="0px"
+  viewBox="0 0 485.6 467.1" style="enable-background:new 0 0 485.6 467.1;" xml:space="preserve">
+<style type="text/css">
+  .st0{fill:url(#radarBase);}
+  .st1{fill:url(#radarBody);}
+  .st2{fill:url(#radarSweep);}
+  .st3{fill:url(#radarMarks);}
+</style>
+<defs>
+  <linearGradient id="radarBase" gradientUnits="userSpaceOnUse" x1="125.2582" y1="280.5514" x2="358.0423" y2="280.5514">
+    <stop offset="0" style="stop-color:#6361FD"/>
+    <stop offset="0.28" style="stop-color:#7E60FD"/>
+    <stop offset="0.65" style="stop-color:#A05EFE"/>
+    <stop offset="1" style="stop-color:#BC5EFF"/>
+  </linearGradient>
+  <linearGradient id="radarBody" gradientUnits="userSpaceOnUse" x1="150.0668" y1="181.8248" x2="359.1946" y2="181.8248">
+    <stop offset="0" style="stop-color:#6361FD"/>
+    <stop offset="0.2" style="stop-color:#7060FD"/>
+    <stop offset="0.62" style="stop-color:#975FFE"/>
+    <stop offset="1" style="stop-color:#BC5EFF"/>
+  </linearGradient>
+  <linearGradient id="radarSweep" gradientUnits="userSpaceOnUse" x1="254.6514" y1="108.6346" x2="332.2306" y2="209.1928">
+    <stop offset="0" style="stop-color:#BC5EFF;stop-opacity:0.95"/>
+    <stop offset="1" style="stop-color:#6361FD;stop-opacity:0.3"/>
+  </linearGradient>
+  <linearGradient id="radarMarks" gradientUnits="userSpaceOnUse" x1="177.7016" y1="181.7748" x2="331.5797" y2="181.7748">
+    <stop offset="0" style="stop-color:#FFFFFF;stop-opacity:0.95"/>
+    <stop offset="1" style="stop-color:#FFFFFF;stop-opacity:0.72"/>
+  </linearGradient>
+</defs>
+<g>
+  <path class="st0" d="M189.8,256.6l160.1-0.2c8.6,0,11.6,3.4,6.7,7.6l-39,32.8c-5,4.2-16.1,7.6-24.8,7.7l-160.1,0.2
+    c-8.6,0-11.6-3.4-6.7-7.6l39-32.8C170,260,181.1,256.6,189.8,256.6L189.8,256.6z"/>
+  <path class="st1" d="M246.9,84.7l0,8.6c-43.9,3.6-78.8,38.6-82.3,82.4l-8,0c-3.6,0-6.5,2.9-6.5,6.5l0,2
+    c0,3.6,2.9,6.5,6.5,6.5l8.1,0c3.8,43.6,38.6,78.3,82.1,82l0,8.5c0,3.6,2.9,6.5,6.5,6.5l2,0c3.6,0,6.5-2.9,6.5-6.5l0-8.5
+    c43.8-3.7,78.5-38.3,82.3-81.8l8.1,0c3.6,0,6.5-2.9,6.5-6.5l0-2c0-3.6-2.9-6.5-6.5-6.5l-8.1,0c-3.4-44-38.2-79-82.1-82.6
+    l0-8.6c0-3.6-2.9-6.5-6.5-6.5l-2,0C249.8,78.2,246.9,81.1,246.9,84.7z M320.4,175.8l-22.9-0.1c-3.6,0-6.5,2.9-6.5,6.5l0,2
+    c0,3.6,2.9,6.5,6.5,6.5l22.9,0.1c-3.6,30.5-27.9,54.7-58.6,58.2l0.1-22.5c0-3.6-2.9-6.5-6.5-6.5l-2,0c-3.6,0-6.5,2.9-6.5,6.5
+    l-0.1,22.5c-30.5-3.5-54.8-27.6-58.5-58.1l22.9,0.1c3.6,0,6.5-2.9,6.5-6.5l0-2c0-3.6-2.9-6.5-6.5-6.5l-22.9-0.1
+    c3.3-30.9,27.8-55.4,58.6-58.9l-0.1,22.4c0,3.6,2.9,6.5,6.5,6.5l2,0c3.6,0,6.5-2.9,6.5-6.5l0.1-22.5
+    C292.6,120.3,317.1,144.8,320.4,175.8z"/>
+  <path class="st2" d="M254.7,182.7l0.2-73.7c25.9,0.4,50.3,15.7,62,39.9L254.7,182.7z"/>
+  <path class="st3" d="M254.6,152.8c-16.5,0-29.9,13.4-29.9,29.9s13.4,29.9,29.9,29.9s29.9-13.4,29.9-29.9S271.1,152.8,254.6,152.8z
+     M254.6,199.7c-9.4,0-17-7.6-17-17s7.6-17,17-17s17,7.6,17,17S264,199.7,254.6,199.7z M254.6,128.8c-29.8,0-54,24.2-54,54
+    c0,2.9-2.3,5.2-5.2,5.2l-12.5,0c-2.9,0-5.2-2.3-5.2-5.2s2.3-5.2,5.2-5.2l7.7,0c2.6-33,30.8-59.3,64-59.3c2.9,0,5.2,2.3,5.2,5.2
+    S257.5,128.8,254.6,128.8z M331.6,182.8c0,2.9-2.3,5.2-5.2,5.2l-12.5,0c-2.9,0-5.2-2.3-5.2-5.2s2.3-5.2,5.2-5.2l12.5,0
+    C329.3,177.6,331.6,179.9,331.6,182.8z M254.6,236.7c29.8,0,54-24.2,54-54c0-2.9,2.3-5.2,5.2-5.2s5.2,2.3,5.2,5.2
+    c0,35.5-28.9,64.4-64.4,64.4c-2.9,0-5.2-2.3-5.2-5.2S251.7,236.7,254.6,236.7z"/>
+  <path class="st3" d="M248,174.3l-13.4,0c-2.9,0-5.2,3-5.1,6.6l0,2c0,3.6,2.3,6.5,5.2,6.5l13.3,0l0,13.3
+    c0,2.9,2.9,5.2,6.5,5.2l2,0c3.6,0,6.5-2.3,6.5-5.2l0-13.4l13.4,0c2.9,0,5.2-3,5.1-6.6l0-2c0-3.6-2.3-6.5-5.2-6.5l-13.3,0
+    l0-13.3c0-2.9-2.9-5.2-6.5-5.2l-2,0c-3.6,0-6.5,2.3-6.5,5.2L248,174.3z"/>
+</g>
+</svg>
