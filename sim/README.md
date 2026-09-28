@@ -38,6 +38,28 @@
 
 语义导航的核心程序在 `semantic_map/semantic_nav.py`，它不只用于仿真：真机上只要跑着 Nav2，就能直接用。
 
+## 仿真测试结果（云端，4 核 CPU，无显卡）
+
+`bash sim/2_semantic_nav_test.sh` 的实测结果：**9/9 通过**。
+
+| 说的话 | 匹配地点 | 分数 | 导航 | 到达误差（真值） | 朝向误差 | 定位误差 |
+|---|---|---|---|---|---|---|
+| 我想喝水 | 茶水间 | 0.657 | 成功 | 0.12 m | 0.01 rad | 0.03 m |
+| 带我去开会 | 会议室 | 0.629 | 成功 | 0.01 m | 0.32 rad | 0.02 m |
+| 我要上厕所 | 卫生间 | 0.715 | 成功 | 0.16 m | 0.00 rad | 0.01 m |
+| 去拿个工具 | 仓库 | 0.626 | 成功 | 0.14 m | 0.28 rad | 0.02 m |
+| 我饿了想热一下饭 | 厨房 | 0.666 | 成功 | 0.18 m | 0.12 rad | 0.02 m |
+| 回到工位 | 办公区 | 0.585 | 成功 | 0.16 m | 0.00 rad | 0.01 m |
+| 有访客来了 | 前台 | 0.595 | 成功 | 0.15 m | 0.01 rad | 0.01 m |
+| 今天股票涨了吗 | （没找到，不导航） | 0.419 | 不动 | — | — | — |
+| 机器人没电了 | 充电桩 | 0.741 | 成功 | 0.15 m | 0.13 rad | 0.01 m |
+
+- **到达误差（真值）**：Gazebo 里机器人的真实位置和目标点的距离。Nav2 到达判定设的是 0.15 m，停车时会再滑一点。
+- **朝向误差**：Nav2 朝向判定是 0.25 rad（约 14°），个别点停车后会多转一点。需要更准可以调小 `yaw_goal_tolerance`。
+- **定位误差**：Cartographer 定位的位置和真实位置的差，全程 ≤ 0.03 m。
+
+每句话的详细数据在 `logs/semantic_nav_test_result.json`。
+
 ## 在你自己的 Ubuntu 24.04 电脑上运行
 
 1. 安装 ROS2 Jazzy（按官方文档 <https://docs.ros.org/en/jazzy/Installation/Ubuntu-Install-Debs.html>），然后：
@@ -76,3 +98,4 @@ cd semantic_map && python3 semantic_nav.py --sim      # 交互模式，输入"�
 - **RoboStack 版 cartographer_node 启动报 "flag was defined more than once"** → 打包问题，`install_ros_cloud.sh` 里对库文件做了修补。
 - **RoboStack 版 Cartographer 的 Lua `include` 读取出错** → 配置文件做成不带 include 的"展开版"（`config/*.lua`），apt 版用同样的文件也没问题。
 - **Nav2 速度指令类型和 TurtleBot3 仿真不一致**（Twist vs TwistStamped）→ `nav2_params.yaml` 里设置 `enable_stamped_cmd_vel: true`。
+- **导航偶尔报 "extrapolation into the future" 后放弃**：Cartographer 的 map→odom 比"现在"晚几十毫秒 → 目标点时间戳留 0（用最新变换），并加大 `transform_tolerance`。**真机上同样适用。**

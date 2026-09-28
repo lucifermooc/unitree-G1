@@ -18,7 +18,6 @@ SIM_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(SIM_DIR), "semantic_map"))
 
 import rclpy  # noqa: E402
-from rclpy.duration import Duration  # noqa: E402
 from rclpy.time import Time  # noqa: E402
 from tf2_ros import Buffer, TransformListener  # noqa: E402
 
@@ -62,14 +61,16 @@ def main():
     TransformListener(tf_buffer, node)
 
     def map_pose():
-        deadline = time.time() + 10
+        # 先连续处理 1 秒的消息，让 TF 缓存里是最新数据；spin_once 每次只处理一条消息，不能边等边读
+        deadline = time.time() + 15
+        flush_until = time.time() + 1.0
         while time.time() < deadline:
-            rclpy.spin_once(node, timeout_sec=0.1)
-            try:
-                t = tf_buffer.lookup_transform("map", "base_footprint", Time(), Duration(seconds=0.5))
-                return t.transform.translation.x, t.transform.translation.y, yaw_of(t.transform.rotation)
-            except Exception:
+            rclpy.spin_once(node, timeout_sec=0.01)
+            if time.time() < flush_until:
                 continue
+            if tf_buffer.can_transform("map", "base_footprint", Time()):
+                t = tf_buffer.lookup_transform("map", "base_footprint", Time())
+                return t.transform.translation.x, t.transform.translation.y, yaw_of(t.transform.rotation)
         raise RuntimeError("拿不到 map -> base_footprint 的变换，定位没起来？")
 
     # 地图坐标系 = 建图开始时机器人的位置；用启动时的一对（定位位姿, 真实位姿）求出两个坐标系的偏移
