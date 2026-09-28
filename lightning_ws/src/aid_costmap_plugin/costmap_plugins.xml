@@ -1,0 +1,20 @@
+<library path="aid_costmap_plugin_core">
+  <class name="aid_costmap_plugin/KeepoutLayer" type="aid_costmap_plugin::KeepoutLayer" base_class_type="nav2_costmap_2d::Layer">
+    <description>This is an example plugin which puts repeating costs keepouts to costmap</description>
+  </class>
+  <class name="aid_costmap_plugin/ObstacleLayer" type="aid_costmap_plugin::ObstacleLayer"   base_class_type="nav2_costmap_2d::Layer">
+    <description>Listens to laser scan and point cloud messages and marks and clears grid cells.</description>
+  </class>
+  <class name="aid_costmap_plugin/VoxelLayer" type="aid_costmap_plugin::VoxelLayer"   base_class_type="nav2_costmap_2d::Layer">
+    <description>Listens to laser scan and point cloud messages and marks and clears grid cells.</description>
+  </class>
+  <class name="aid_costmap_plugin/CliffLayer" type="aid_costmap_plugin::CliffLayer"   base_class_type="nav2_costmap_2d::Layer">
+    <description>Listens to cliff sensor and point cloud messages and marks and clears grid cells.</description>
+  </class>
+  <class name="aid_costmap_plugin/SaftyLayer" type="aid_costmap_plugin::SaftyLayer"   base_class_type="nav2_costmap_2d::Layer">
+    <description>Safty layer to avoid dangerous areas based on sensor data.</description>
+  </class>
+  <class name="aid_costmap_plugin/RangeSensorLayer" type="aid_costmap_plugin::RangeSensorLayer" base_class_type="nav2_costmap_2d::Layer">
+    <description>A range-sensor (sonar, IR) based obstacle layer for costmap_2d</description>
+  </class>
+</library>

@@ -1,0 +1,87 @@
+# G1 碰撞停车：本文件就是运行值，launch 不再改写（2026-09-21 起）。
+# 平面模式下 base_link 为地面投影（地面 z=0），定位直接给 map->base_link，
+# 所以 odom_frame_id 就是 map，且必须关掉 base_shift_correction。
+collision_monitor:
+  ros__parameters:
+    use_sim_time: false
+    base_frame_id: "base_link"
+    # 没有独立里程计坐标系：定位输出 map->base_link，位姿外推关闭。
+    odom_frame_id: "map"
+    base_shift_correction: False
+    cmd_vel_in_topic: "/cmd_vel"
+    cmd_vel_out_topic: "/cmd_vel_safe"
+    enable_stamped_cmd_vel: false
+    state_topic: "collision_monitor_state"
+    transform_tolerance: 0.5
+    # registered_scan 为 10 Hz 单帧；0.35 s 内没新帧就判失效。
+    source_timeout: 0.35
+    stop_pub_timeout: 2.0
+    bond_heartbeat_period: 0.1
+    # 只保留固定停车圈：local_costmap 未激活时 footprint 话题不存在，approach 型多边形会一直等待。
+    polygons: ["SafetyZone"]
+    SafetyZone:
+      type: "circle"
+      action_type: "stop"
+      # robot_radius(0.50) + 0.20 余量，与 nav2_params.yaml 的 robot_radius 手工保持一致。
+      radius: 0.70
+      min_points: 4
+      visualize: True
+      enabled: True
+    observation_sources: ["pointcloud1"]
+    pointcloud1:
+      type: "pointcloud"
+      # 与 Nav2 障碍层同源：LIO 去畸变后的单帧点云。
+      topic: "/lightning/registered_scan"
+      # map 系高度，地面 z=0。
+      min_height: 0.10
+      max_height: 1.8
+      enabled: True
+      obstacles_angle: 1.5708  # 90 degrees, range of angles to check
+
+cloud_filter_up_rgbd_node:
+  ros__parameters:
+    use_sim_time: false
+    is_yaml_param: true
+    sub_map_topic: "global_map_cloud"
+    pub_frame: "base_footprint"    # base_footprint or front_livox
+    cloud_frame: "depth_camera_link_2"
+    sub_cloud_topic: "aurora_2/points2"   #/cloud_points_undistort_front
+    pub_cloud_topic: "aurora_2/points2_filted"
+    odom_topic: "/odom"
+    is_remove_ground: true
+    ground_thresh: 0.03  # 去除地面厚度
+    ground_curvature_threshold: 0.03  # 去除地面曲率阈值
+    curvature_k_search: 30  # 曲率法线估计邻域点数(KSearch)
+    is_filter_blind_area: true
+    
+    blind_area_max_point: [0.22, 0.22, 1.05]
+    blind_area_min_point: [-0.22, -0.22, 0.20]
+    is_filter_body_cloud: false
+    roi_max_point: [0.2, 0.05, 0.3]
+    roi_min_point: [-0.2, -0.05, 0.1]
+    voxel_grid_size: 0.025
+    diff_distance_threshold: 0.05
+    is_filter_ramp: false
+    ramp_voxel_grid_size: 0.05
+    pmf_cell_size: 0.025
+    pmf_max_window_size: 6
+    pmf_slope: 0.04
+    pmf_initial_distance: 0.005
+    pmf_max_distance: 0.025
+    base_max_x: 1.5  # 限定pub_frame 下的点云范围
+    base_max_y: 0.7
+    base_min_y: -0.7
+    rectangles: ["rectangle1","rectangle2"]
+    rectangle1:
+      x_min: 47.2
+      z_min: -2.0
+      x_max: 53.0
+      y_max: 14.0
+      z_max: 1.5
+    rectangle2:
+      x_min: 13.1
+      y_min: 38.3
+      z_min: 0.0
+      x_max: 17.8
+      y_max: 63.7
+      z_max: 3.0

@@ -1,5 +1,7 @@
 __pycache__/
 *.pyc
 .venv/
-semantic_map/qdrant_storage/
-sim/logs/
+# 本地 Qdrant 数据（旧目录）和仿真/测试产物
+semantic_map/
+sim/
+/tmp/

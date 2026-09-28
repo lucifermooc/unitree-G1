@@ -1,0 +1,9 @@
+float32 index
+string mark_name
+float32 x
+float32 y
+float32 z
+float32 yaw
+float32 pitch
+float32 roll
+string mark_type

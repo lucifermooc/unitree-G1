@@ -1,0 +1,11 @@
+semantic_map_server:
+  ros__parameters:
+    qdrant_host: "localhost"
+    qdrant_port: 6333
+    collection_prefix: "semantic_map"   # 每张地图一个 collection：semantic_map_<map_id>
+    model_name: "BAAI/bge-m3"           # 第一次运行自动下载（约 2.3GB）；也可以填本地模型目录
+    use_fp16: false                     # CPU 用 false；Thor（CUDA）改成 true
+    # 相似度低于这个分数就算"没找到"，机器人不动。0.52 是用 28 句相关 + 15 句无关的话实测定的，
+    # 换成真实点位后用前端"试一试"多试几句再调。
+    score_threshold: 0.52
+    top_k: 3

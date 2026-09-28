@@ -1,0 +1,410 @@
+diff --git a/lightning-lm/config/default_livox.yaml b/lightning-lm/config/default_livox.yaml
+index 3d14545..e214832 100644
+--- a/lightning-lm/config/default_livox.yaml
++++ b/lightning-lm/config/default_livox.yaml
+@@ -69,11 +69,13 @@ system:
+   with_g2p5: true # 是否需要栅格地图
+   step_on_kf: false # 是否在关键帧处暂停
+ 
+-  enable_lidar_loc_skip: false
++  # 激光定位频率：配合 lidar_loc.loc_on_kf: false，每 2 帧 LIO 做一次 NDT（~5 Hz，单次 ~35-45 ms/4 线程）。
++  # 注意 AsyncMessageProcess 的 skip_num=2 才是"走一帧跳一帧"（=1 不跳帧）。
++  enable_lidar_loc_skip: true
+   enable_lidar_loc_rviz: false
+   enable_lidar_odom_skip: false
+   evaluation: false
+-  lidar_loc_skip_num: 4
++  lidar_loc_skip_num: 2
+   lidar_odom_skip_num: 2
+   map_path: ~/maps/new_map/
+   map_save_root: ~/maps
+@@ -112,8 +114,21 @@ lidar_loc:
+   update_err_v: 0.2
+   update_kf_dis: 2.0
+   update_lidar_loc_score: 2.5
+-  loc_on_kf: true
++  # 2026-09-19：true 时只在 LIO 关键帧做激光定位，静止时关键帧 2 s 一个，而每次只修正残差的 10%
++  # （balance_factor），实测启动航向误差收敛 τ≈19 s（10°→1° 约 43 s）。改为 false 后约 5 Hz，τ≈2 s。
++  loc_on_kf: false
+   try_self_extrap: false
++  # NDT 结果与 LO 预测的融合比例（旧代码硬编码 0.1），需新版 lidar_loc.cc 才生效，旧二进制忽略这些键。
++  balance_factor: 0.1
++  # 初始化后的快速收敛：NDT 分值 >= fast_converge_min_score 时按 fast_converge_factor 融合，
++  # 连续 fast_converge_ok_frames 次残差 < fast_converge_ang_deg 且 < fast_converge_pos 后恢复 balance_factor。
++  # 本图正确匹配分值 1.65~1.87（2026-09-19 09:19 日志），低于门限的匹配保持旧的 10% 慢融合。
++  fast_converge_factor: 0.5
++  fast_converge_min_score: 1.5
++  fast_converge_ang_deg: 0.5
++  fast_converge_pos: 0.05
++  fast_converge_ok_frames: 3
++  fast_converge_max_frames: 50
+ maps:
+   delete_when_unload: false
+   dyn_cloud_policy: persistent
+diff --git a/lightning-lm/src/app/run_loc_online.cc b/lightning-lm/src/app/run_loc_online.cc
+index 6843230..ab5d330 100644
+--- a/lightning-lm/src/app/run_loc_online.cc
++++ b/lightning-lm/src/app/run_loc_online.cc
+@@ -2,8 +2,11 @@
+ // Created by xiang on 25-3-18.
+ //
+ 
++#include <execinfo.h>
+ #include <gflags/gflags.h>
+ #include <glog/logging.h>
++#include <unistd.h>
++#include <csignal>
+ 
+ #include "core/system/loc_system.h"
+ #include "ui/pangolin_window.h"
+@@ -11,11 +14,47 @@
+ 
+ DEFINE_string(config, "./config/default.yaml", "配置文件");
+ 
++namespace {
++/// 致命信号（SIGSEGV 等）时把原始调用栈写到 stderr（launch_manager 日志可见），再按默认动作重新触发，
++/// 退出码 / apport core 不变。输出形如 liblightning.libs.so(+0x1234)，用 addr2line -e <so> 0x1234 解析。
++/// 只用 async-signal-safe 的 write/backtrace_symbols_fd（backtrace 已在启动时预热，避免信号里首次 dlopen）。
++void FatalSignalHandler(int sig) {
++    static const char kMsg[] = "\n*** run_loc_online caught fatal signal, raw backtrace:\n";
++    (void)!write(STDERR_FILENO, kMsg, sizeof(kMsg) - 1);
++    void* frames[64];
++    const int n = backtrace(frames, 64);
++    backtrace_symbols_fd(frames, n, STDERR_FILENO);
++    std::signal(sig, SIG_DFL);
++    raise(sig);
++}
++
++void InstallFatalSignalBacktrace() {
++    void* warmup[1];
++    backtrace(warmup, 1);  // 预加载 libgcc_s，信号处理里不再分配内存
++    static char alt_stack[64 * 1024];
++    stack_t ss{};
++    ss.ss_sp = alt_stack;
++    ss.ss_size = sizeof(alt_stack);
++    sigaltstack(&ss, nullptr);  // 主线程栈溢出时也能打印（其他线程在自身栈上处理）
++    struct sigaction sa{};
++    sa.sa_handler = FatalSignalHandler;
++    sa.sa_flags = SA_ONSTACK;
++    sigemptyset(&sa.sa_mask);
++    for (int sig : {SIGSEGV, SIGBUS, SIGFPE, SIGILL}) {
++        sigaction(sig, &sa, nullptr);
++    }
++}
++}  // namespace
++
+ /// 运行定位的测试
+ int main(int argc, char** argv) {
+     google::InitGoogleLogging(argv[0]);
+     FLAGS_colorlogtostderr = true;
+     FLAGS_stderrthreshold = google::ERROR;  // 终端只打 ERROR，完整日志见 /tmp/<程序名>.INFO
++    // glog 默认缓冲 INFO（最长 30 s 才落盘），进程被信号杀死时缓冲丢失——
++    // 2026-09-19 10:03:47 的段错误日志只剩 loc_system.cc:28 一行就是这个原因。逐条落盘开销可忽略（~100 行/s）。
++    FLAGS_logbuflevel = -1;
++    InstallFatalSignalBacktrace();
+ 
+     google::ParseCommandLineFlags(&argc, &argv, true);
+     using namespace lightning;
+diff --git a/lightning-lm/src/core/lio/laser_mapping.cc b/lightning-lm/src/core/lio/laser_mapping.cc
+index 9ba0053..4e8f7a0 100644
+--- a/lightning-lm/src/core/lio/laser_mapping.cc
++++ b/lightning-lm/src/core/lio/laser_mapping.cc
+@@ -312,13 +312,17 @@ bool LaserMapping::Run() {
+     }
+ 
+     /// 更新kf_for_imu
+-    kf_imu_ = kf_;
+-    if (!measures_.imu_.empty()) {
+-        double t = measures_.imu_.back()->timestamp;
+-        for (auto &imu : imu_buffer_) {
+-            double dt = imu->timestamp - t;
+-            kf_imu_.Predict(dt, p_imu_->Q_, imu->angular_velocity, imu->linear_acceleration);
+-            t = imu->timestamp;
++    {
++        // 遍历 imu_buffer_ 并覆盖 kf_imu_，须与 ProcessIMU()/GetIMUState() 互斥（见 SyncPackages）
++        UL lock(mtx_buffer_);
++        kf_imu_ = kf_;
++        if (!measures_.imu_.empty()) {
++            double t = measures_.imu_.back()->timestamp;
++            for (auto &imu : imu_buffer_) {
++                double dt = imu->timestamp - t;
++                kf_imu_.Predict(dt, p_imu_->Q_, imu->angular_velocity, imu->linear_acceleration);
++                t = imu->timestamp;
++            }
+         }
+     }
+ 
+@@ -481,6 +485,9 @@ void LaserMapping::ProcessPointCloud2(CloudPtr cloud) {
+ }
+ 
+ bool LaserMapping::SyncPackages() {
++    // 定位在线模式下 Run()/SyncPackages() 跑在异步 LIO 线程，而 ProcessIMU() 在 ROS 回调线程
++    // 往 imu_buffer_ push_back；std::deque 并发 push_back 与 front/pop_front 是未定义行为。
++    UL lock(mtx_buffer_);
+     if (lidar_buffer_.empty() || imu_buffer_.empty()) {
+         LOG(INFO) << "lidar or imu is empty";
+         return false;
+diff --git a/lightning-lm/src/core/lio/laser_mapping.h b/lightning-lm/src/core/lio/laser_mapping.h
+index 325c054..5b6e2af 100644
+--- a/lightning-lm/src/core/lio/laser_mapping.h
++++ b/lightning-lm/src/core/lio/laser_mapping.h
+@@ -3,6 +3,7 @@
+ 
+ #include <pcl/filters/voxel_grid.h>
+ #include <condition_variable>
++#include <mutex>
+ #include <sensor_msgs/msg/point_cloud2.hpp>
+ #include <thread>
+ 
+@@ -91,6 +92,8 @@ class LaserMapping {
+ 
+     /// 获取IMU状态
+     NavState GetIMUState() const {
++        // kf_imu_ 由 IMU 回调线程递推、由 LIO 线程在 Run() 中整体覆盖（定位在线模式两者不同线程）
++        std::lock_guard<std::mutex> lock(mtx_buffer_);
+         if (p_imu_->IsIMUInited()) {
+             return kf_imu_.GetX();
+         } else {
+@@ -182,7 +185,7 @@ class LaserMapping {
+     /// 点到点相关
+     std::vector<char> point_selected_icp_;  // 点到点的selected points
+ 
+-    std::mutex mtx_buffer_;
++    mutable std::mutex mtx_buffer_;  // 保护 imu_buffer_/lidar_buffer_/kf_imu_（IMU 回调与 LIO 线程共用）
+     std::deque<double> time_buffer_;
+ 
+     std::deque<PointCloudType::Ptr> lidar_buffer_;
+diff --git a/lightning-lm/src/core/localization/lidar_loc/lidar_loc.cc b/lightning-lm/src/core/localization/lidar_loc/lidar_loc.cc
+index d47191d..f71c2d2 100644
+--- a/lightning-lm/src/core/localization/lidar_loc/lidar_loc.cc
++++ b/lightning-lm/src/core/localization/lidar_loc/lidar_loc.cc
+@@ -102,6 +102,28 @@ bool LidarLoc::Init(const std::string& config_path) {
+         }
+     }
+ 
++    // 融合比例 / 快速收敛参数：可选键，缺省保持默认值（老配置行为不变，除快速收敛默认开启外）
++    auto optional_param = [&yaml](const char* key, auto& value) {
++        try {
++            value = yaml.GetValue<std::remove_reference_t<decltype(value)>>("lidar_loc", key);
++        } catch (const std::exception&) {
++        }
++    };
++    optional_param("balance_factor", options_.balance_factor_);
++    optional_param("fast_converge_factor", options_.fast_converge_factor_);
++    optional_param("fast_converge_min_score", options_.fast_converge_min_score_);
++    optional_param("fast_converge_ang_deg", options_.fast_converge_ang_deg_);
++    optional_param("fast_converge_pos", options_.fast_converge_pos_);
++    optional_param("fast_converge_ok_frames", options_.fast_converge_ok_frames_);
++    optional_param("fast_converge_max_frames", options_.fast_converge_max_frames_);
++    options_.balance_factor_ = std::clamp(options_.balance_factor_, 0.0, 1.0);
++    options_.fast_converge_factor_ = std::clamp(options_.fast_converge_factor_, 0.0, 1.0);
++    LOG(INFO) << "lidar loc balance factor: " << options_.balance_factor_
++              << ", fast converge factor: " << options_.fast_converge_factor_
++              << " (score >= " << options_.fast_converge_min_score_ << ", until " << options_.fast_converge_ok_frames_
++              << "x residual < " << options_.fast_converge_ang_deg_ << " deg / " << options_.fast_converge_pos_
++              << " m, max " << options_.fast_converge_max_frames_ << " frames)";
++
+     lidar_loc::grid_search_angle_step = yaml.GetValue<double>("lidar_loc", "grid_search_angle_step");
+     lidar_loc::grid_search_angle_range = yaml.GetValue<double>("lidar_loc", "grid_search_angle_range");
+ 
+@@ -350,6 +372,11 @@ bool LidarLoc::InitWithFP(CloudPtr input, const SE3& fp_pose) {
+ 
+         //  定位成功，则清空失败记录
+         fp_init_fail_pose_vec_.clear();
++
++        // 进入快速收敛阶段
++        fast_converge_frames_ = 0;
++        fast_converge_ok_cnt_ = 0;
++        converged_ = options_.fast_converge_factor_ <= options_.balance_factor_;
+     } else {
+         // 添加失败历史记录
+         LOG(INFO) << "init failed, score: " << fitness_score;
+@@ -652,9 +679,36 @@ void LidarLoc::Align(const CloudPtr& input) {
+     //     }
+     // }
+ 
+-    // 用纯激光定位有点太抖了，加一些权重
+-    Vec6d delta = (guess_from_lo.inverse() * current_pose_esti).log();
+-    SE3 esti_balanced = guess_from_lo * SE3::exp(delta * 0.1);
++    // 用纯激光定位有点太抖了，加一些权重：每次只修正 NDT 相对 LO 预测残差的 balance_factor_（默认 10%）。
++    // 定位每 ~2 s 才跑一次（loc_on_kf）时，10° 的初始航向误差要 ~45 s 才降到 1°（2026-09-19 实测 τ≈19 s）。
++    // 初始化后的快速收敛阶段：NDT 分值足够高时用 fast_converge_factor_，残差连续达标后恢复平滑。
++    const SE3 ndt_residual = guess_from_lo.inverse() * current_pose_esti;
++    double balance = options_.balance_factor_;
++    if (!converged_) {
++        ++fast_converge_frames_;
++        const double res_ang_deg = ndt_residual.so3().log().norm() * 180.0 / M_PI;
++        const double res_pos = ndt_residual.translation().head<2>().norm();
++        if (fitness_score >= options_.fast_converge_min_score_) {
++            balance = std::max(balance, options_.fast_converge_factor_);
++        }
++        if (res_ang_deg < options_.fast_converge_ang_deg_ && res_pos < options_.fast_converge_pos_) {
++            ++fast_converge_ok_cnt_;
++        } else {
++            fast_converge_ok_cnt_ = 0;
++        }
++        LOG(INFO) << "fast converge #" << fast_converge_frames_ << ": residual " << res_ang_deg << " deg / "
++                  << res_pos << " m, score " << fitness_score << ", balance " << balance;
++        if (fast_converge_ok_cnt_ >= options_.fast_converge_ok_frames_) {
++            converged_ = true;
++            LOG(INFO) << "lidar loc converged after " << fast_converge_frames_ << " frames, balance back to "
++                      << options_.balance_factor_;
++        } else if (fast_converge_frames_ >= options_.fast_converge_max_frames_) {
++            converged_ = true;
++            LOG(WARNING) << "lidar loc not converged within " << fast_converge_frames_
++                         << " frames (low score or unstable match), fall back to balance " << options_.balance_factor_;
++        }
++    }
++    SE3 esti_balanced = guess_from_lo * SE3::exp(ndt_residual.log() * balance);
+     current_pose_esti = esti_balanced;
+ 
+     // double score_self = 0;
+@@ -856,12 +910,14 @@ bool LidarLoc::Localize(SE3& pose, double& confidence, CloudPtr input, CloudPtr
+ 
+     LOG(INFO) << "loc from: " << pose.translation().transpose();
+ 
++    // pcl_ndt_ 会被 UpdateMapThread 在 match_mutex_ 下整体替换（启动后首轮必定替换一次），
++    // 读取它也必须持锁，否则可能解引用刚被释放的旧 NDT 对象。
++    UL lock(match_mutex_);
+     if (pcl_ndt_->getInputTarget() == nullptr) {
+         LOG(INFO) << "lidar loc target is null, skip";
+         return false;
+     }
+ 
+-    UL lock(match_mutex_);
+     NDTType::Ptr ndt = nullptr;
+ 
+     if (use_rough_res) {
+diff --git a/lightning-lm/src/core/localization/lidar_loc/lidar_loc.h b/lightning-lm/src/core/localization/lidar_loc/lidar_loc.h
+index 4da9612..cf48aa6 100644
+--- a/lightning-lm/src/core/localization/lidar_loc/lidar_loc.h
++++ b/lightning-lm/src/core/localization/lidar_loc/lidar_loc.h
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include <pcl/registration/icp.h>
++#include <atomic>
+ #include <chrono>
+ #include <deque>
+ #include <iostream>
+@@ -49,6 +50,19 @@ class LidarLoc {
+         bool gravity_constrain_ = false;
+         double gravity_constrain_max_deg_ = 15.0;      // 单次修正超过该角度视为异常，不修正
+ 
++        /// 跟踪阶段 NDT 结果与 LO 预测的融合比例（原硬编码 0.1）：每次激光定位只修正残差的这一比例
++        double balance_factor_ = 0.1;
++        /// 初始化后的快速收敛阶段：NDT 分值 >= fast_converge_min_score_ 时用更大的融合比例，
++        /// 连续 fast_converge_ok_frames_ 次残差 < (fast_converge_ang_deg_, fast_converge_pos_) 视为收敛，
++        /// 之后恢复 balance_factor_；超过 fast_converge_max_frames_ 次仍未收敛也退出快速阶段。
++        /// fast_converge_factor_ <= balance_factor_ 即关闭该功能（等价旧行为）。
++        double fast_converge_factor_ = 0.5;
++        double fast_converge_min_score_ = 1.5;
++        double fast_converge_ang_deg_ = 0.5;
++        double fast_converge_pos_ = 0.05;
++        int fast_converge_ok_frames_ = 3;
++        int fast_converge_max_frames_ = 50;
++
+         /// 点云过滤
+         // float filter_z_min_ = -1.0;
+         float filter_z_max_ = 30.0;
+@@ -138,6 +152,9 @@ class LidarLoc {
+     /// 激光定位是否认为LO有效
+     bool LidarLocThinkLOReliable() { return lo_reliable_; }
+ 
++    /// 初始化后是否已完成快速收敛（未完成时上层应每帧送入点云，而不是只送关键帧）
++    bool Converged() const { return converged_.load(); }
++
+    private:
+     // 内部函数  ==========================================================================
+     /**
+@@ -212,6 +229,10 @@ class LidarLoc {
+     SE3 initial_pose_;               // 手动设置的初始位姿
+     bool loc_inited_ = false;        // 定位是否初始化成功
+ 
++    std::atomic_bool converged_{false};  // 初始化后快速收敛阶段是否结束（LIO 线程读取）
++    int fast_converge_frames_ = 0;       // 快速收敛阶段已处理的定位次数
++    int fast_converge_ok_cnt_ = 0;       // 连续残差达标次数
++
+     double current_timestamp_ = 0;  // 本次输入的时间戳
+     double last_timestamp_ = 0;     // 上次输入的时间戳
+ 
+diff --git a/lightning-lm/src/core/localization/localization.cpp b/lightning-lm/src/core/localization/localization.cpp
+index e92455d..c522061 100644
+--- a/lightning-lm/src/core/localization/localization.cpp
++++ b/lightning-lm/src/core/localization/localization.cpp
+@@ -229,7 +229,8 @@ void Localization::LidarOdomProcCloud(CloudPtr cloud) {
+ 
+     auto scan = lio_->GetProjCloud();
+ 
+-    if (options_.loc_on_kf_) {
++    // 快速收敛阶段（初始化后到残差达标前）每帧都做激光定位，不等关键帧（静止时关键帧 2 s 才一个）
++    if (options_.loc_on_kf_ && lidar_loc_->Converged()) {
+         auto kf = lio_->GetKeyframe();
+         if (kf == lio_kf_) {
+             /// 关键帧未更新，那就只更新IMU状态
+diff --git a/lightning-lm/src/utils/timer.cc b/lightning-lm/src/utils/timer.cc
+index a735497..958e514 100644
+--- a/lightning-lm/src/utils/timer.cc
++++ b/lightning-lm/src/utils/timer.cc
+@@ -13,6 +13,7 @@ namespace lightning {
+ std::map<std::string, Timer::TimerRecord> Timer::records_;
+ 
+ void Timer::PrintAll() {
++    std::lock_guard<std::mutex> lock(mutex_);
+     LOG(INFO) << (">>> ===== Printing run time =====");
+     for (auto& r : records_) {
+         auto& rec = r.second.time_usage_in_ms_;
+@@ -27,6 +28,7 @@ void Timer::PrintAll() {
+ }
+ 
+ void Timer::DumpIntoFile(const std::string& file_name) {
++    std::lock_guard<std::mutex> lock(mutex_);
+     std::ofstream ofs(file_name, std::ios::out);
+     if (!ofs.is_open()) {
+         LOG(ERROR) << "Failed to open file: " << file_name;
+@@ -58,6 +60,7 @@ void Timer::DumpIntoFile(const std::string& file_name) {
+ }
+ 
+ double Timer::GetMeanTime(const std::string& func_name) {
++    std::lock_guard<std::mutex> lock(mutex_);
+     if (records_.find(func_name) == records_.end()) {
+         return 0.0;
+     }
+diff --git a/lightning-lm/src/utils/timer.h b/lightning-lm/src/utils/timer.h
+index 777be1d..972893b 100644
+--- a/lightning-lm/src/utils/timer.h
++++ b/lightning-lm/src/utils/timer.h
+@@ -7,6 +7,7 @@
+ #include <deque>
+ #include <functional>
+ #include <map>
++#include <mutex>
+ #include <string>
+ #include <vector>
+ 
+@@ -40,6 +41,10 @@ class Timer {
+         auto t2 = std::chrono::steady_clock::now();
+         auto time_used = std::chrono::duration_cast<std::chrono::duration<double>>(t2 - t1).count() * 1000;
+ 
++        // records_ 是进程级全局 std::map，定位在线模式下 ROS 回调线程（"Proc Lidar"）与
++        // LIO 异步线程（"Preprocess (Standard)" 等）会同时首次插入新 key，无锁时红黑树被并发改写，
++        // 启动瞬间偶发 SIGSEGV。只锁记账部分，不锁被测函数本身。
++        std::lock_guard<std::mutex> lock(mutex_);
+         if (records_.find(func_name) != records_.end()) {
+             records_[func_name].time_usage_in_ms_.emplace_back(time_used);
+             while (records_[func_name].time_usage_in_ms_.size() > 2000) {
+@@ -64,9 +69,13 @@ class Timer {
+     static double GetMeanTime(const std::string& func_name);
+ 
+     /// 清理记录
+-    static void Clear() { records_.clear(); }
++    static void Clear() {
++        std::lock_guard<std::mutex> lock(mutex_);
++        records_.clear();
++    }
+ 
+    private:
+     static std::map<std::string, TimerRecord> records_;
++    inline static std::mutex mutex_;  // 保护 records_（多线程调用 Evaluate）
+ };
+ }  // namespace lightning

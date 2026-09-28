@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>g1_sim</name>
+  <version>0.1.0</version>
+  <description>无硬件仿真：真实的 map_manager_server / waypoint_manage / rosbridge + 模拟机器人（代替 lightning、传感器、Nav2）</description>
+  <maintainer email="dev@example.com">G1 team</maintainer>
+  <license>Apache-2.0</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>aid_robot_msgs</exec_depend>
+  <exec_depend>aid_robot_py</exec_depend>
+  <exec_depend>nav2_msgs</exec_depend>
+  <exec_depend>rosbridge_server</exec_depend>
+  <exec_depend>semantic_map_ros</exec_depend>
+  <exec_depend>g1_web</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
