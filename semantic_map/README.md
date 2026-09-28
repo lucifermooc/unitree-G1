@@ -44,6 +44,16 @@ data/semantic_map.json
 | `build_index.py` | 建库 |
 | `query.py` | 查询（命令行 / 被其他程序 import） |
 
+## 一键部署
+
+装好 Docker 后，在 `semantic_map/` 目录下运行：
+
+```bash
+bash setup.sh
+```
+
+脚本会依次完成下面第一次运行的全部步骤，可以重复运行。想了解每一步在做什么，看下一节。
+
 ## 第一次运行（Ubuntu 笔记本，只用 CPU）
 
 所有命令都在 `semantic_map/` 目录下执行。
