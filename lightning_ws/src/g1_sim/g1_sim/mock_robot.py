@@ -2,7 +2,7 @@
 
 真机上由这些程序提供，本节点按相同的接口和行为模拟：
   /mode_set, /aid_save_map, /robot_status   ← robot_status_manager（C++，依赖 lightning）
-  /map（原始栅格，transient_local）           ← lightning 建图（前端预览由 g1_web 的 map_preview_bridge 转成 /map_base64）
+  /map（原始栅格，transient_local）           ← lightning 建图（前端预览由原有的 map_transform_node 转成 /map_base64）
   /base_link_pose                            ← robot_pose_pub（定位 TF）
   /battery_state                             ← g1_nav_bridge battery_state_bridge（宇树电池）
   /start_init_pose, /aid_init_pose, /initialpose ← 重定位

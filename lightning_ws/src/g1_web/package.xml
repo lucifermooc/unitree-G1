@@ -3,14 +3,10 @@
 <package format="3">
   <name>g1_web</name>
   <version>0.1.0</version>
-  <description>G1 网页控制台：前端静态文件 + 建图预览转换节点（/map → /map_base64）</description>
+  <description>G1 网页控制台：前端静态文件</description>
   <maintainer email="dev@example.com">G1 team</maintainer>
   <license>Apache-2.0</license>
 
-  <exec_depend>rclpy</exec_depend>
-  <exec_depend>nav_msgs</exec_depend>
-  <exec_depend>python3-opencv</exec_depend>
-  <exec_depend>python3-numpy</exec_depend>
 
   <export>
     <build_type>ament_python</build_type>

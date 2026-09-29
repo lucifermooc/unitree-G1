@@ -22,9 +22,9 @@ echo "== 1. 编译（只编译需要的 5 个包）=="
   --install-base "$WORK_DIR/install" --packages-select aid_robot_msgs aid_robot_py semantic_map_ros g1_web g1_sim) | tail -3
 source "$WORK_DIR/install/setup.bash"
 
-echo "== 2. 单元测试（semantic_map_ros、g1_web）=="
-(cd "$REPO/lightning_ws/src" && PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=semantic_map_ros:g1_web \
-  python3 -B -m pytest semantic_map_ros/test g1_web/test -q -p no:cacheprovider)
+echo "== 2. 单元测试（semantic_map_ros）=="
+(cd "$REPO/lightning_ws/src" && PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=semantic_map_ros \
+  python3 -B -m pytest semantic_map_ros/test -q -p no:cacheprovider)
 
 echo "== 3. 启动 Qdrant =="
 if ! curl -fsS http://localhost:6333/ >/dev/null 2>&1; then
@@ -39,7 +39,7 @@ setsid ros2 launch g1_sim sim.launch.py sim_home:="$WORK_DIR/home" \
 SIM_PID=$!
 cleanup() { kill -INT -- "-$SIM_PID" 2>/dev/null; sleep 3; kill -KILL -- "-$SIM_PID" 2>/dev/null || true; }
 trap cleanup EXIT
-for _ in $(seq 60); do
+for _ in $(seq 150); do   # 冷启动时加载 2.3 GB 模型可能要几分钟
   grep -q "embedding model loaded" "$WORK_DIR/sim.log" && curl -fsS http://localhost:8080/ >/dev/null 2>&1 && break
   sleep 2
 done

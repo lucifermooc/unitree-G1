@@ -1,7 +1,7 @@
 import os
 from glob import glob
 
-from setuptools import find_packages, setup
+from setuptools import setup
 
 package_name = 'g1_web'
 
@@ -18,7 +18,7 @@ def www_files():
 setup(
     name=package_name,
     version='0.1.0',
-    packages=find_packages(exclude=['test']),
+    packages=[],
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
@@ -28,11 +28,6 @@ setup(
     zip_safe=True,
     maintainer='G1 team',
     maintainer_email='dev@example.com',
-    description='G1 web console and mapping preview bridge',
+    description='G1 web console (static files)',
     license='Apache-2.0',
-    entry_points={
-        'console_scripts': [
-            'map_preview_bridge = g1_web.map_preview_bridge:main',
-        ],
-    },
 )
