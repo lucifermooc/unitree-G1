@@ -5,7 +5,8 @@
 
 真实代码（原样启动，不做任何修改）：
   rosbridge_server        前端通信（ws://<ip>:9090），参数与 robot_bringup/rosbridge_websocket_launch.py 相同
-  g1_web map_preview_bridge + 网页服务   建图预览 /map → /map_base64，前端网页（新增包，真机同样使用）
+  aid_robot_py map_transform_node    建图预览 /map → /map_base64
+  g1_web 网页服务                    前端网页（新增包，真机同样使用）
   aid_robot_py map_manager_node      地图 / 位置点 / 禁行线数据库
   aid_robot_py waypoint_manage_node  单点导航、巡逻、/task_status
   semantic_map_ros semantic_map_server   语义地图（需要 Qdrant）
@@ -37,7 +38,7 @@ def _nodes(context):
              output="screen", parameters=[{"port": int(LaunchConfiguration("ws_port").perform(context)),
                                            "default_call_service_timeout": 0.0,
                                            "call_services_in_new_thread": False}]),
-        Node(package="g1_web", executable="map_preview_bridge", name="map_preview_bridge", output="screen"),
+        Node(package="aid_robot_py", executable="map_transform_node", name="map_transform_node", output="screen"),
         Node(package="aid_robot_py", executable="map_manager_node", name="map_manager_server",
              output="screen", additional_env=env),
         Node(package="aid_robot_py", executable="waypoint_manage_node", name="waypoint_mange",

@@ -337,12 +337,12 @@ const points = JSON.parse(res.message).map(row => ({ id: row.id, ...JSON.parse(r
 
 响应：`{"success": true, "message": "ok"}`。
 
-##### 2.2.4 建图实时预览 ⚠
+##### 2.2.4 建图实时预览
 
 **Topic**: `/map_base64`　**Message Type**: `nav_msgs/msg/OccupancyGrid`
 
-⚠ G1 版本里原先的发布代码已经不在 `map_manager_server` 中。现在由新增的 `g1_web/map_preview_bridge`
-（`ros2 launch g1_web web.launch.py` 会启动）订阅 Lightning 建图发布的原始栅格 `/map`，每秒转换一次后发布。
+由 `aid_robot_py/map_transform_node` 发布（`robot.launch.py` 启动）：订阅 Lightning 建图发布的原始栅格 `/map`，
+转成 JPEG 图片后发布。（旧文档写的是 map_manager_server 输出，实际是 map_transform。）
 
 ````
 {"op": "subscribe", "topic": "/map_base64", "type": "nav_msgs/msg/OccupancyGrid", "compression": "png"}
@@ -356,7 +356,7 @@ img.src = "data:image/jpg;base64," + b64;
 // 像素坐标 ↔ 地图坐标：u = (x - origin.x) / resolution；v = height - (y - origin.y) / resolution
 ````
 
-图片颜色：障碍物黑色；空闲区 RGB(127,145,200)；未探索区 RGB(82,108,170)。
+图片颜色：障碍物黑色；空闲区 RGB(127,145,200)；未探索区 RGB(82,108,170)；占用概率居中的格子 RGB(100,125,185)。
 
 ##### 2.2.5 切换地图
 
@@ -765,7 +765,7 @@ ros2 launch semantic_map_ros semantic_map.launch.py                       # Thor
 | 2.1.4 点位列表 | `message` 写成数组、`point_list` 写成对象 | 两层都是 JSON 字符串 |
 | 2.2.1 / 4 mode_set | 响应 `{"msg": "ok"}` | 响应字段是 `message` |
 | 2.2.3 保存地图 | 只有 `/add_map`，类型写 MapOperation，map_file 写"绝对路径" | 先 `/aid_save_map` 再 `/add_map`；类型 MapOperationAdd；路径相对家目录 |
-| 2.2.4 建图预览 | 由 map_manager_server 输出 | G1 版已无此代码，新增 `g1_web/map_preview_bridge` 从 `/map` 转换 |
+| 2.2.4 建图预览 | 由 map_manager_server 输出 | 实际由 `aid_robot_py/map_transform_node` 发布；补充 data 的编码方式 |
 | 2.2.5 切换地图 | — | 补充：还需 `/mode_set localization` 才会加载 |
 | 2.2.9 禁行线 | `/draw_no_go_lines` | 不存在；实际是 `/set_forbidden` + `/aid_draw_forbidden_line`（+ `/get_forbidden`） |
 | 2.2.10 橡皮擦 | — | 补充 grayscale 含义、会改写文件、需重新加载 |

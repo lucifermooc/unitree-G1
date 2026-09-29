@@ -11,7 +11,7 @@ lightning_ws/                       G1 的 ROS2 工作区（Jazzy）
     g1_nav_bridge, livox_*, realsense-ros, librealsense, unitree_*, point_filter ...
                                     ← 原有后端，原样保留，未做任何修改
     semantic_map_ros/               【新增】语义地图节点：一句话 → 位置点 → /nav_to_pose
-    g1_web/                         【新增】网页控制台（www/）+ 建图预览转换节点（/map → /map_base64）
+    g1_web/                         【新增】网页控制台（www/ 静态文件 + 网页服务 launch）
     g1_sim/                         【新增】无硬件仿真：模拟机器人 + 仿真 launch（只用于测试）
 tests/
   run_sim_e2e.sh                    一键全流程测试（编译 → 单元测试 → 仿真 → 浏览器端到端测试）
@@ -26,7 +26,7 @@ tests/
 colcon build --packages-select semantic_map_ros g1_web      # 只编译新增的包
 # 语义地图（先按 src/semantic_map_ros/README.md 装依赖、启动 Qdrant）
 ros2 launch semantic_map_ros semantic_map.launch.py use_fp16:=true
-# 网页控制台 + 建图预览
+# 网页控制台
 ros2 launch g1_web web.launch.py
 ```
 
@@ -44,7 +44,7 @@ ros2 launch g1_sim sim.launch.py           # 然后浏览器打开 http://localh
 ```
 
 仿真里**真实运行**的：rosbridge（参数与真机相同）、`map_manager_server`（地图/点位/禁行线数据库）、
-`waypoint_manage`（导航/巡逻调度、任务状态）、`semantic_map_server`、`map_preview_bridge`、网页。
+`waypoint_manage`（导航/巡逻调度、任务状态）、`map_transform`（建图预览 `/map → /map_base64`）、`semantic_map_server`、网页。
 **模拟**的（`g1_sim/mock_robot`）：模式切换和保存地图（robot_status_manager）、Lightning 建图/定位、电池、Nav2 执行
 （按 A* 路径走过去）、橡皮擦和禁行线地图。仿真地图是 `g1_sim/maps/office`（一层办公室）。
 
@@ -54,9 +54,9 @@ ros2 launch g1_sim sim.launch.py           # 然后浏览器打开 http://localh
 ## 已验证 / 未验证
 
 已在云端仿真验证（`tests/run_sim_e2e.sh`）：网页上的每个功能都经真实后端节点走通，结果通过后端服务回查；
-语义地图用真实 BGE-M3 模型 + Qdrant。单元测试覆盖语义地图核心逻辑和建图预览转换。
+语义地图用真实 BGE-M3 模型 + Qdrant。单元测试覆盖语义地图核心逻辑。
 
-未验证（需要在 Thor 上做）：Lightning 真实建图下的 `/map → /map_base64` 预览、真实 Nav2 导航、
+未验证（需要在 Thor 上做）：Lightning 真实建图下的建图预览、真实 Nav2 导航、
 Thor 上 BGE-M3 的 GPU 推理和速度、国内网络下载模型。
 
 接口文档核对出的问题（旧文档与代码不一致处）列在接口文档末尾的《附录 A 修订记录》。

@@ -16,18 +16,19 @@
 
 - `semantic_map_ros`：语义地图节点，服务 `/semantic_map/{search,go,rebuild}`；点位用数据库 `waypoint_node`，
   点位 JSON 可带 `description`；BGE-M3 + Qdrant；点位变化自动重建；`evaluate.py` 调阈值（默认 0.52）。
-- `g1_web`：网页控制台 `www/` + `map_preview_bridge`（`/map` → `/map_base64`，G1 代码里原本没人发布它）。
+- `g1_web`：网页控制台 `www/`（建图预览用原有的 `map_transform_node` 发布的 `/map_base64`）。
 - `g1_sim`：模拟机器人 + `sim.launch.py`（真实 rosbridge / map_manager_server / waypoint_manage）。
-- `bash tests/run_sim_e2e.sh`：36/36 通过；单元测试 7 项通过。
+- `bash tests/run_sim_e2e.sh`：36/36 通过；单元测试 5 项通过。
 
 ## 下一步（按顺序，都需要 Thor）
 
-1. 把 `semantic_map_ros`、`g1_web` 两个包 rsync 到 Thor 的 `/opt/G1/lighting_ws/src/`，只编译这两个包。
+1. 只需把 `semantic_map_ros` rsync 到 Thor 的 `/opt/G1/lighting_ws/src/` 并只编译它。`g1_web` 只有静态网页，
+   **不用放到 Thor**：在任意电脑上 `cd lightning_ws/src/g1_web/www && python3 -m http.server 8080`，
+   浏览器打开 `http://localhost:8080/?host=<Thor IP>`。建图预览 `/map_base64` 由原有的 `map_transform_node` 提供。
 2. Thor 上装语义地图依赖（Jetson 版 torch、`requirements.txt`），`docker compose` 起 Qdrant，
    BGE-M3 模型可从电脑拷 `~/.cache/huggingface/hub/models--BAAI--bge-m3`。
-3. 启动 `ros2 launch g1_web web.launch.py` 和 `ros2 launch semantic_map_ros semantic_map.launch.py use_fp16:=true`，
-   浏览器打开 `http://<Thor>:8080`。
-4. 真机验证（先征得用户同意）：建图时 `/map_base64` 预览是否出图；地图/点位/禁行线/橡皮擦；
+3. Thor 上启动 `ros2 launch semantic_map_ros semantic_map.launch.py use_fp16:=true`；网页按第 1 步在电脑上打开。
+4. 真机验证（先征得用户同意）：建图时网页预览是否出图；地图/点位/禁行线/橡皮擦；
    语义搜索（只搜索不导航）；导航类功能按 CLAUDE.md 要求由用户在场时再测。
 5. 用真实点位 + 真实说法跑 `python3 -m semantic_map_ros.evaluate --queries ...`，调整 `score_threshold`。
 
