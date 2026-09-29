@@ -3,6 +3,8 @@
     ros2 launch semantic_map_ros semantic_map.launch.py
     ros2 launch semantic_map_ros semantic_map.launch.py use_fp16:=true   # Thor 上用 GPU
     ros2 launch semantic_map_ros semantic_map.launch.py text_in_action:=go   # ASR 话题输入找到就导航
+    HF_HUB_OFFLINE=1 ros2 launch semantic_map_ros semantic_map.launch.py use_fp16:=true \
+        model_name:=$HOME/models/bge-m3                                  # 用本地模型，不联网
 
 前提：Qdrant 已启动（docker/docker-compose.yml），map_manager_server / waypoint_manage 在运行。
 """
@@ -24,9 +26,11 @@ def generate_launch_description():
         "use_fp16": "false",
         "score_threshold": "0.52",
         "text_in_action": "search",   # ASR 话题输入：search 只搜索；go 找到就导航
+        # 本地模型目录可跳过联网检查（配合 HF_HUB_OFFLINE=1），如 ~/.cache/huggingface/hub/models--BAAI--bge-m3/snapshots/<commit>
+        "model_name": "BAAI/bge-m3",
     }
     types = {"qdrant_port": int, "use_fp16": bool, "score_threshold": float, "qdrant_host": str,
-             "text_in_action": str}
+             "text_in_action": str, "model_name": str}
     return LaunchDescription(
         [DeclareLaunchArgument(k, default_value=v) for k, v in args.items()] + [
             Node(
