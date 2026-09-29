@@ -430,7 +430,7 @@ function renderPoints() {
     li.className = p.id === S.selectedId ? "sel" : "";
     li.innerHTML = '<div class="grow"><div class="t"></div><div class="s"></div></div>';
     li.querySelector(".t").textContent = p.name + (cellWarning(p.x, p.y) ? " ⚠" : "");
-    li.querySelector(".s").textContent = `${p.description ? p.description + " · " : ""}(${p.x}, ${p.y}) ${deg(p.yaw)}°`;
+    li.querySelector(".s").textContent = `${p.description ? p.description + " · " : ""}(${round(p.x, 2)}, ${round(p.y, 2)}) ${deg(p.yaw)}°`;
     li.querySelector(".grow").onclick = () => { selectPoint(p.id); centerOn(p.x, p.y); };
     ul.appendChild(li);
   }
