@@ -9,6 +9,7 @@ description 是语义地图新增的可选字段，后端原样存储；没有�
 import hashlib
 import json
 import math
+import unicodedata
 
 VECTOR_SIZE = 1024  # BGE-M3 dense 向量维度
 
@@ -39,6 +40,52 @@ def parse_point_rows(message):
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
             continue
     return places
+
+
+def parse_request(data, default_source):
+    """请求内容 → (原始文本, 来源)。
+
+    data 可以是一句普通文本，也可以是 JSON：{"text": "我想喝水", "source": "asr"}，
+    source 用来在调试记录里区分是谁发来的；不带 source 时用 default_source。
+    """
+    if isinstance(data, str) and data.lstrip().startswith("{"):
+        try:
+            obj = json.loads(data)
+        except json.JSONDecodeError:
+            obj = None
+        if isinstance(obj, dict) and isinstance(obj.get("text"), str):
+            source = str(obj.get("source") or default_source).strip() or default_source
+            return obj["text"], source
+    return data, default_source
+
+
+def _char_name(ch):
+    return {" ": "空格", "\t": "制表符", "\n": "换行", "\r": "回车", "\u3000": "全角空格",
+            "\ufeff": "BOM", "\u200b": "零宽空格", "\ufffd": "乱码替换符"}.get(ch, f"U+{ord(ch):04X}")
+
+
+def inspect_text(raw):
+    """检查收到的原始文本，返回 (送进模型的文本, 问题列表)。
+
+    清理只做两件事：去掉不可见的控制/格式字符，去掉首尾空白。不改错字、不删标点。
+    问题列表用来判断"是发来的数据有问题，还是匹配有问题"。
+    """
+    issues = []
+    edges = raw[:len(raw) - len(raw.lstrip())] + raw[len(raw.rstrip()):]
+    if edges:
+        issues.append("首尾有空白：" + "、".join(sorted({_char_name(c) for c in edges})))
+    hidden = {c for c in raw if unicodedata.category(c) in ("Cc", "Cf") and c not in "\t\n\r"}
+    inner_breaks = {c for c in raw.strip() if c in "\t\n\r"}
+    if hidden:
+        issues.append("含不可见字符：" + "、".join(sorted(_char_name(c) for c in hidden)))
+    if inner_breaks:
+        issues.append("中间有换行/制表符：" + "、".join(sorted(_char_name(c) for c in inner_breaks)))
+    if "\ufffd" in raw:
+        issues.append("含乱码替换符（编码错误）")
+    text = "".join(c for c in raw if unicodedata.category(c) not in ("Cc", "Cf") or c in "\t\n\r").strip()
+    if not text:
+        issues.append("清理后是空的")
+    return text, issues
 
 
 def place_text(place):

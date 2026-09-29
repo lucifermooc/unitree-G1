@@ -25,6 +25,7 @@ const SRV = {
   semSearch: ["/semantic_map/search", "aid_robot_msgs/srv/SetString"],
   semGo: ["/semantic_map/go", "aid_robot_msgs/srv/SetString"],
   semRebuild: ["/semantic_map/rebuild", "std_srvs/srv/Trigger"],
+  semHistory: ["/semantic_map/history", "std_srvs/srv/Trigger"],
 };
 const TASK_STATUS = ["空闲", "执行中", "成功", "失败", "暂停", "已取消"];
 const TASK_TYPE = ["单点导航", "巡逻"];
@@ -42,7 +43,7 @@ const S = {
   tool: null,         // point | nogo | eraser | relocate
   selectedId: null, pending: null, drag: null,
   nogoStart: null, eraser: [],
-  patrolSel: [], semHitId: null, mappingPreview: false,
+  patrolSel: [], semHitId: null, mappingPreview: false, semLog: [],
 };
 window.app = S;  // 方便调试和自动化测试
 
@@ -148,8 +149,10 @@ async function onConnected() {
     $("stTask").textContent = m.status === 0 ? "空闲" : text;
     $("navTask").textContent = $("stTask").textContent;
   });
+  subscribe("/semantic_map/debug", "std_msgs/msg/String", (m) => addSemLog([JSON.parse(m.data)]));
   await guard(loadMaps);
   await guard(loadCurrentMap);
+  await guard(loadSemLog);
 }
 
 // ---------------- 地图数据 ----------------
@@ -523,9 +526,73 @@ async function semantic(go) {
   try {
     if (go) await ensurePatrolMode();
   } catch (e) { $("semResult").textContent = `失败：${e.message}`; throw e; }
-  const r = await call(go ? SRV.semGo : SRV.semSearch, { data: q }, 180000);
+  const data = JSON.stringify({ text: q, source: "web" });  // source 只用于调试记录
+  const r = await call(go ? SRV.semGo : SRV.semSearch, { data }, 180000);
   if (!r.success) { $("semResult").textContent = `失败：${r.message}`; throw new Error(r.message); }
   renderSemantic(JSON.parse(r.message));
+}
+
+// 调试记录：语义地图节点每处理一次请求就在 /semantic_map/debug 发一条，连上时先用 /semantic_map/history 补齐之前的
+const semKey = (r) => `${r.time}|${r.entry}|${r.raw}`;
+function addSemLog(records) {
+  const seen = new Set(S.semLog.map(semKey));
+  for (const r of records) if (!seen.has(semKey(r))) { S.semLog.push(r); seen.add(semKey(r)); }
+  S.semLog.sort((a, b) => (a.time < b.time ? -1 : 1));
+  if (S.semLog.length > 200) S.semLog = S.semLog.slice(-200);
+  renderSemLog();
+}
+async function loadSemLog() {
+  const r = await call(SRV.semHistory);
+  if (r.success) addSemLog(JSON.parse(r.message || "[]"));
+}
+function rawNode(visible) {  // 服务端已把看不见的字符写成 ␠ \n ⟨U+200B⟩，这里给它们加底色
+  const span = document.createElement("span");
+  for (const part of visible.split(/(␠|\\[nrt]|⟨U\+[0-9A-F]+⟩)/)) {
+    if (!part) continue;
+    const t = document.createElement("span");
+    t.textContent = part;
+    if (/^(␠|\\[nrt]|⟨U\+[0-9A-F]+⟩)$/.test(part)) t.className = "inv";
+    span.appendChild(t);
+  }
+  return span;
+}
+const SOURCE_NAME = { search: "服务 search", go: "服务 go", topic: "话题 text_in", web: "网页" };
+function renderSemLog() {
+  const ul = $("semDebug"); ul.innerHTML = "";
+  const onlyIssues = $("semDebugIssues").checked;
+  for (const r of S.semLog.slice().reverse()) {
+    const bad = !r.ok || (r.issues && r.issues.length) || !r.found;
+    if (onlyIssues && !bad) continue;
+    const li = document.createElement("li");
+    const meta = document.createElement("div"); meta.className = "meta";
+    meta.textContent = `${r.time.slice(11, 23)} · 来源 ${SOURCE_NAME[r.source] || r.source}` +
+      `${r.source !== r.entry ? `（经 ${SOURCE_NAME[r.entry] || r.entry}）` : ""} · ${r.length} 字 · ${r.elapsed_ms} ms`;
+    const raw = document.createElement("div"); raw.className = "raw";
+    raw.append("原文：「", rawNode(r.raw_visible), "」");
+    li.append(meta, raw);
+    for (const i of r.issues || []) {
+      const d = document.createElement("div"); d.className = "issue"; d.textContent = `⚠ ${i}`; li.appendChild(d);
+    }
+    const res = document.createElement("div"); res.className = "res";
+    const scores = (r.candidates || []).map((c) => `${c.name} ${c.score.toFixed(3)}`).join("，");
+    if (!r.ok) { res.classList.add("bad"); res.textContent = `✗ 出错：${r.error}`; }
+    else if (r.found) {
+      const b = document.createElement("span"); b.className = "best"; b.textContent = `→ ${r.best}`;
+      res.append(b, `${r.navigating ? "（已发导航）" : ""}  得分：${scores}（阈值 ${r.threshold}）`);
+    } else {
+      res.classList.add("bad");
+      res.textContent = `✗ 没找到：${scores || "没有点位"}${scores ? `，最高分低于阈值 ${r.threshold}` : ""}`;
+    }
+    li.appendChild(res);
+    ul.appendChild(li);
+  }
+  if (!ul.children.length) ul.innerHTML = '<li class="meta">还没有记录</li>';
+}
+function sendAsrTest() {
+  const text = $("semAsrText").value;
+  if (!text.trim()) throw new Error("先输入一句话");
+  publish("/semantic_map/text_in", "std_msgs/msg/String", { data: text });  // 原样发送，不 trim，方便测试首尾空白
+  toast("已发到 /semantic_map/text_in，结果看下面的调试记录");
 }
 
 // ---------------- 禁行线 / 橡皮擦 ----------------
@@ -802,6 +869,9 @@ $("btnPointHere").onclick = () => {
 $("btnSemSearch").onclick = () => guard(() => semantic(false));
 $("btnSemGo").onclick = () => guard(() => semantic(true));
 $("semQuery").addEventListener("keydown", (e) => { if (e.key === "Enter") guard(() => semantic(false)); });
+$("btnSemAsr").onclick = () => guard(sendAsrTest);
+$("btnSemDebugRefresh").onclick = () => guard(loadSemLog);
+$("semDebugIssues").onchange = renderSemLog;
 $("btnSemRebuild").onclick = () => guard(async () => {
   const r = await call(SRV.semRebuild, {}, 180000);
   if (!r.success) throw new Error(r.message);

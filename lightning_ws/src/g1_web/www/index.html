@@ -103,6 +103,19 @@
       </div>
       <div id="semResult" class="result"></div>
       <div class="row"><button id="btnSemRebuild" class="subtle">手动重建语义库</button></div>
+
+      <h3>调试记录</h3>
+      <p class="note">所有来源（网页、服务调用、ASR 话题）的每一次请求。原文按收到的样子显示，看不见的字符用
+        <span class="inv">黄底</span> 标出来：原文就不对是发送方的问题；原文没问题但得分低或匹配错，是点位描述或阈值的问题。</p>
+      <div class="row">
+        <input id="semAsrText" placeholder="模拟 ASR：往 /semantic_map/text_in 发一句">
+        <button id="btnSemAsr">发送</button>
+      </div>
+      <div class="row">
+        <label class="check"><input type="checkbox" id="semDebugIssues"> 只看有问题的</label>
+        <button id="btnSemDebugRefresh" class="subtle">刷新</button>
+      </div>
+      <ul id="semDebug" class="list debug"></ul>
     </section>
 
     <!-- 导航巡逻 -->

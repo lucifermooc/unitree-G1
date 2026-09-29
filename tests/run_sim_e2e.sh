@@ -46,5 +46,6 @@ done
 grep -q "embedding model loaded" "$WORK_DIR/sim.log" || { echo "❌ 语义地图模型没加载起来，看 $WORK_DIR/sim.log"; exit 1; }
 
 echo "== 5. 浏览器端到端测试 =="
-NODE_PATH="${NODE_PATH:-$(npm root -g)}" SHOT_DIR="$WORK_DIR" node "$REPO/tests/e2e/console.e2e.js"
+NODE_PATH="${NODE_PATH:-$(npm root -g)}" SHOT_DIR="$WORK_DIR" \
+  SEM_LOG="$WORK_DIR/home/maps/semantic_map_log.jsonl" node "$REPO/tests/e2e/console.e2e.js"
 echo "截图在 $WORK_DIR/e2e_*.png，仿真日志 $WORK_DIR/sim.log"

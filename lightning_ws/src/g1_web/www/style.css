@@ -110,3 +110,15 @@ label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 2px;
   .conn input { width: 160px; }
 }
 @media (prefers-reduced-motion: reduce) { #toast { transition: none; } }
+
+/* 语义地图调试记录 */
+.inv { background: #fff3b0; color: #6b4f00; border-radius: 2px; padding: 0 1px; font-family: ui-monospace, monospace; font-size: 11px; }
+.list.debug { max-height: 320px; overflow-y: auto; }
+.list.debug li { display: block; font-size: 12px; }
+.list.debug .meta { color: var(--muted, #666); }
+.list.debug .raw { font-size: 13px; margin: 2px 0; word-break: break-all; }
+.list.debug .issue { color: var(--warn); }
+.list.debug .res.bad { color: var(--bad); }
+.list.debug .res .best { color: var(--hit); font-weight: 600; }
+label.check { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; }
+label.check input { width: auto; }
