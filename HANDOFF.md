@@ -26,7 +26,7 @@
 ## 下一步（按顺序，都需要 Thor）
 
 1. 只需把 `semantic_map_ros` rsync 到 Thor 的 `/opt/G1/lighting_ws/src/` 并只编译它。`g1_web` 只有静态网页，
-   **不用放到 Thor**：在任意电脑上 `cd lightning_ws/src/g1_web/www && python3 -m http.server 8080`，
+   **不用放到 Thor**：在任意电脑上 `python3 lightning_ws/src/g1_web/serve.py 8080`，
    浏览器打开 `http://localhost:8080/?host=<Thor IP>`。建图预览 `/map_base64` 由原有的 `map_transform_node` 提供。
 2. Thor 上装语义地图依赖（Jetson 版 torch、`requirements.txt`），`docker compose` 起 Qdrant，
    BGE-M3 模型可从电脑拷 `~/.cache/huggingface/hub/models--BAAI--bge-m3`。

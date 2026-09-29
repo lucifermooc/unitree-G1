@@ -212,8 +212,8 @@ async function loadNogo() {
   S.nogo = (res.lines || []).map((l) => ({ x1: l.start.x, y1: l.start.y, x2: l.end.x, y2: l.end.y }));
   renderNogo(); draw();
 }
-function pointData(p) {  // 写进数据库的 JSON：原有字段 + 语义描述
-  return JSON.stringify({ position: { x: round(p.x), y: round(p.y), z: 0 }, orientation: yawToQuat(p.yaw),
+function pointData(p) {  // 写进数据库的 JSON：原有字段 + 语义描述。坐标按 double 原样存，不取整
+  return JSON.stringify({ position: { x: p.x, y: p.y, z: 0 }, orientation: yawToQuat(p.yaw),
     name: p.name, description: p.description });
 }
 
@@ -336,7 +336,7 @@ function currentPoint() { return S.pending || S.points.find((p) => p.id === S.se
 function selectPoint(id) { S.pending = null; S.selectedId = id; renderAll(); }
 function newPoint(x, y, yaw) {
   S.selectedId = null;
-  S.pending = { id: null, name: "", description: "", x: round(x), y: round(y), yaw: round(yaw, 4) };
+  S.pending = { id: null, name: "", description: "", x, y, yaw };
   renderAll(); $("pName").focus();
 }
 function cellWarning(x, y) {
@@ -382,16 +382,17 @@ function fillPointForm() {
   if (!p) return;
   $("pointFormTitle").textContent = S.pending ? "新点位" : `编辑点位（id ${p.id}）`;
   $("pName").value = p.name; $("pDesc").value = p.description;
-  $("pX").value = p.x; $("pY").value = p.y; $("pYaw").value = deg(p.yaw);
+  // 朝向只为显示保留 2 位小数；没改过就沿用原值（见 readPointForm），避免保存时被显示值覆盖
+  $("pX").value = p.x; $("pY").value = p.y; $("pYaw").value = $("pYaw").dataset.shown = round((p.yaw * 180) / Math.PI, 2);
   $("pWarn").textContent = cellWarning(p.x, p.y);
   $("btnPointDelete").hidden = $("btnPointGo").hidden = !!S.pending;
 }
 function readPointForm(p) {
   p.name = $("pName").value.trim(); p.description = $("pDesc").value.trim();
   const x = parseFloat($("pX").value), y = parseFloat($("pY").value), yawDeg = parseFloat($("pYaw").value);
-  if (Number.isFinite(x)) p.x = round(x);
-  if (Number.isFinite(y)) p.y = round(y);
-  if (Number.isFinite(yawDeg)) p.yaw = round((yawDeg * Math.PI) / 180, 4);
+  if (Number.isFinite(x)) p.x = x;
+  if (Number.isFinite(y)) p.y = y;
+  if (Number.isFinite(yawDeg) && $("pYaw").value !== $("pYaw").dataset.shown) p.yaw = (yawDeg * Math.PI) / 180;
 }
 async function savePoint() {
   const p = currentPoint();
@@ -798,7 +799,7 @@ canvas.addEventListener("pointermove", (e) => {
   else if (d.kind === "erase") paintEraser(sx, sy);
   else if (d.kind === "move") {
     if (!d.moved && Math.hypot(sx - d.last[0], sy - d.last[1]) < 4) return;
-    d.moved = true; d.p.x = round(x); d.p.y = round(y); fillPointForm();
+    d.moved = true; d.p.x = x; d.p.y = y; fillPointForm();
   }
   draw();
 });
