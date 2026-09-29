@@ -14,6 +14,7 @@
   }
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }  /* 否则 .empty 等自带 display 的元素设了 hidden 仍会显示 */
 html, body { height: 100%; margin: 0; }
 body { display: flex; flex-direction: column; background: var(--bg); color: var(--text);
   font: 14px/1.5 system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }

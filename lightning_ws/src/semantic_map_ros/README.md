@@ -68,6 +68,23 @@
    ```
    看到 `embedding model loaded` 就可以用了。
 
+### Thor 实际部署记录（2026-09-29，JetPack 7 / R38.2，CUDA 13）
+
+- **torch**：官方源 download.pytorch.org 国内超时，用 NVIDIA 的源：
+  `pip install --user --break-system-packages -c ~/semantic_map_constraints.txt torch --index-url https://pypi.jetson-ai-lab.io/sbsa/cu130/+simple/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple`
+  （实装 torch 2.14.0+cu130，自带 CUDA 运行库，不用装 CUDA 工具包）。
+- **约束文件** `~/semantic_map_constraints.txt`：`numpy==1.26.4`（系统 OpenCV 依赖 numpy 1.x，`map_transform_node` 要用）、
+  `setuptools<80`（colcon 要求；torch 会顺带装 setuptools 84，必须挡住）、`torch==2.14.0`。
+  其余依赖用清华源 `-i https://pypi.tuna.tsinghua.edu.cn/simple`。
+- **Qdrant**：Thor 上已有一个容器 `qdrant`（6333，开机自启），直接共用，**不要**再 `docker compose up`（端口冲突）。
+- **模型**：hf-mirror 的大文件会跳到 xethub，新版 huggingface_hub 走 Xet 协议会 401 / 卡住。用 curl 下载到缓存
+  （脚本 `/opt/G1/bags/replay/fetch_bge.sh`），固定路径 `~/models/bge-m3` 链到 snapshot 目录。
+  **启动时必须给本地目录**：给仓库名的话，离线模式会因 onnx/imgs 没下而报 IncompleteSnapshotError，联网时则会多下 2.3 GB onnx。
+  ```bash
+  HF_HUB_OFFLINE=1 ros2 launch semantic_map_ros semantic_map.launch.py use_fp16:=true model_name:=$HOME/models/bge-m3
+  ```
+- 实测：加载 ~10 s，单句编码 ~18 ms，显存 ~1.2 GB。
+
 ## 调阈值
 
 `config/semantic_map.yaml` 里的 `score_threshold`（默认 0.52）：最高分低于它就算"没找到"。
