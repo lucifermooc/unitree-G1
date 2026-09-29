@@ -51,7 +51,8 @@ def _nodes(context):
                           "log_file": os.path.join(sim_home, "maps", "semantic_map_log.jsonl")}]),
     ]
     actions.append(ExecuteProcess(
-        cmd=["python3", "-m", "http.server", LaunchConfiguration("web_port").perform(context),
+        cmd=["python3", os.path.join(get_package_share_directory("g1_web"), "serve.py"),
+             LaunchConfiguration("web_port").perform(context),
              "--directory", os.path.expanduser(web_dir)],
         output="log"))
     return actions

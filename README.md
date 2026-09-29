@@ -32,7 +32,7 @@ ros2 launch semantic_map_ros semantic_map.launch.py use_fp16:=true
 网页控制台（`g1_web`）只是静态网页，**不用放到 Thor**，在自己电脑上打开：
 
 ```bash
-cd lightning_ws/src/g1_web/www && python3 -m http.server 8080
+python3 lightning_ws/src/g1_web/serve.py 8080
 ```
 
 浏览器打开 `http://localhost:8080/?host=<Thor的IP>`（或打开后在连接地址里填 Thor 的 IP）。

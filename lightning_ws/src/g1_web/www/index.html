@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>G1 控制台</title>
-<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="style.css?v=3">
 </head>
 <body>
 <header id="topbar">
@@ -80,9 +80,9 @@
         <label for="pDesc">描述（语义搜索用，写成人会怎么说）</label>
         <textarea id="pDesc" rows="2" placeholder="例如：有饮水机和咖啡机，可以接水、喝水、泡茶"></textarea>
         <div class="grid3">
-          <div><label for="pX">x（米）</label><input id="pX" type="number" step="0.01"></div>
-          <div><label for="pY">y（米）</label><input id="pY" type="number" step="0.01"></div>
-          <div><label for="pYaw">朝向（度）</label><input id="pYaw" type="number" step="1"></div>
+          <div><label for="pX">x（米）</label><input id="pX" type="number" step="any"></div>
+          <div><label for="pY">y（米）</label><input id="pY" type="number" step="any"></div>
+          <div><label for="pYaw">朝向（度）</label><input id="pYaw" type="number" step="any"></div>
         </div>
         <p id="pWarn" class="warn"></p>
         <div class="row wrap">
@@ -198,6 +198,6 @@
 <div id="toast" role="status" aria-live="polite"></div>
 
 <script src="vendor/roslib.js"></script>
-<script src="app.js"></script>
+<script src="app.js?v=3"></script>
 </body>
 </html>

@@ -15,12 +15,13 @@ from launch.substitutions import LaunchConfiguration
 
 
 def generate_launch_description():
-    www = os.path.join(get_package_share_directory("g1_web"), "www")
+    share = get_package_share_directory("g1_web")
+    www = os.path.join(share, "www")
     return LaunchDescription([
         DeclareLaunchArgument("port", default_value="8080"),
         DeclareLaunchArgument("www_dir", default_value=www, description="前端文件目录"),
         ExecuteProcess(
-            cmd=["python3", "-m", "http.server", LaunchConfiguration("port"),
+            cmd=["python3", os.path.join(share, "serve.py"), LaunchConfiguration("port"),
                  "--directory", LaunchConfiguration("www_dir")],
             output="log"),
     ])
