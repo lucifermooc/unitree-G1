@@ -47,7 +47,8 @@ def _nodes(context):
              additional_env=env),
         Node(package="semantic_map_ros", executable="semantic_map_server", name="semantic_map_server",
              output="screen", condition=IfCondition(LaunchConfiguration("semantic")),
-             parameters=[{"collection_prefix": "sim_semantic_map"}]),
+             parameters=[{"collection_prefix": "sim_semantic_map",
+                          "log_file": os.path.join(sim_home, "maps", "semantic_map_log.jsonl")}]),
     ]
     actions.append(ExecuteProcess(
         cmd=["python3", "-m", "http.server", LaunchConfiguration("web_port").perform(context),

@@ -9,3 +9,10 @@ semantic_map_server:
     # 换成真实点位后用前端"试一试"多试几句再调。
     score_threshold: 0.52
     top_k: 3
+    # 话题输入：ASR 等模块往这个话题发 std_msgs/String，内容是一句话，或 {"text": "...", "source": "asr"}。
+    # 填 "" 关掉。text_in_action：search = 只搜索（结果看 /semantic_map/debug）；go = 找到就导航。
+    text_in_topic: "/semantic_map/text_in"
+    text_in_action: "search"
+    # 调试记录：每次请求一行 JSON（来源、原始文本、问题、得分、结果），填 "" 不写文件。超过 20MB 滚动成 .1
+    log_file: "~/maps/semantic_map_log.jsonl"
+    history_size: 200                   # /semantic_map/history 返回的最近条数

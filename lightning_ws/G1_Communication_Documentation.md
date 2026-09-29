@@ -694,7 +694,8 @@ ros2 launch semantic_map_ros semantic_map.launch.py                       # Thor
                 \"best\": {\"id\": 1, \"name\": \"茶水间\", \"description\": \"有饮水机和咖啡机，可以接水、喝水、泡茶\",
                           \"frame_id\": \"map\", \"x\": 12.5, \"y\": 4.0, \"z\": 0.0, \"yaw\": 1.5708,
                           \"orientation\": {\"x\": 0.0, \"y\": 0.0, \"z\": 0.7071, \"w\": 0.7071}, \"score\": 0.6767},
-                \"candidates\": [ ...前 3 名，格式同 best... ]}"
+                \"candidates\": [ ...前 3 名，格式同 best... ],
+                \"source\": \"search\", \"issues\": []}"
   },
   "result": true
 }
@@ -707,6 +708,11 @@ ros2 launch semantic_map_ros semantic_map.launch.py                       # Thor
 | `candidates` | 前 3 名（无论是否达到阈值，方便调试） |
 | `score` | 余弦相似度，越接近 1 越像 |
 | `rebuilt` | 这次搜索前是否因为点位变化自动重建了语义库 |
+| `source` | 请求来源（见 5.5），调试用 |
+| `issues` | 收到的原文里发现的问题，例如 `首尾有空白：换行`、`含不可见字符：零宽空格`；没问题时为 `[]` |
+
+`data` 可以是一句普通文本，也可以是 JSON 字符串 `{"text": "我想喝水", "source": "asr"}`（见 5.5）。
+送进模型前只去掉不可见字符和首尾空白，不改错字、不删标点。
 
 失败时 `success: false`，`message` 是原因，例如 `no current map (select a map first)`、
 `service /get_map_point_list not available`、`empty query`。
@@ -745,9 +751,78 @@ ros2 launch semantic_map_ros semantic_map.launch.py                       # Thor
 | `use_fp16` | false | Thor（CUDA）上设 true |
 | `score_threshold` | 0.52 | 低于它算"没找到" |
 | `top_k` | 3 | 返回的候选数 |
+| `text_in_topic` | /semantic_map/text_in | 话题输入（5.5），填 "" 关闭 |
+| `text_in_action` | search | 话题输入收到后：search 只搜索；go 找到就导航（launch 参数 `text_in_action:=go`） |
+| `log_file` | ~/maps/semantic_map_log.jsonl | 调试记录文件（5.6），填 "" 不写；超过 20 MB 滚动成 `.1` |
+| `history_size` | 200 | `/semantic_map/history` 返回的最近条数 |
 
 用真实点位调阈值：`python3 -m semantic_map_ros.evaluate --queries <句子.json>`（格式见
 `config/eval_queries_example.json`），它会给出推荐阈值。
+
+##### 5.5 其他模块（ASR 等）怎么把文本发过来
+
+两种方式任选，效果相同。**建议带上 `source`**，调试记录里才分得清是谁发的。
+
+**方式一：调服务**（能拿到应答，知道找没找到）——同 5.1 / 5.2，`data` 用 JSON 字符串带来源：
+
+````
+{"op": "call_service", "service": "/semantic_map/go",
+ "args": {"data": "{\"text\": \"我想喝水\", \"source\": \"asr\"}"}}
+````
+
+ROS2 节点里直接调：`ros2 service call /semantic_map/search aid_robot_msgs/srv/SetString "{data: '我想喝水'}"`
+
+**方式二：发话题**（只管发，不等结果；适合 ASR 识别完一句就往外丢）
+
+**Topic**: `/semantic_map/text_in`　**Message Type**: `std_msgs/msg/String`
+
+````
+{"op": "publish", "topic": "/semantic_map/text_in", "msg": {"data": "我想喝水"}}
+````
+
+- `data` 同样可以是 `{"text": "...", "source": "asr"}`；不带 source 时来源记为 `topic`。
+- 默认只搜索不导航（`text_in_action: search`），结果看 5.6 的调试记录；要让它找到就走，启动时加 `text_in_action:=go`。
+- 走导航时和 5.2 一样，需要机器人已经在定位 + 导航模式（`/mode_set patrol`），这个由调用方或网页负责。
+- 话题没有应答；出错（例如发来空内容、没有选地图）只会记在调试记录里。
+
+##### 5.6 调试：看到别人发来的原文和匹配得分
+
+每一次请求（网页、服务、话题，成功或失败）都会留下一条记录，用来判断问题出在哪一边：
+**原文就不对**（错字、多了空格/换行/乱码）是发送方的问题；**原文没问题但得分低或匹配错**，是点位描述或阈值的问题。
+
+看记录的三种方法：
+
+1. **网页**："点位与语义"页 → 语义地图 → 调试记录。实时显示所有来源的请求，看不见的字符用黄底标出；
+   可勾"只看有问题的"；上面的"模拟 ASR"输入框可以往 `/semantic_map/text_in` 发一句，检查话题链路。
+2. **话题** `/semantic_map/debug`（`std_msgs/msg/String`，每条一个 JSON）：`ros2 topic echo /semantic_map/debug`
+3. **文件** `~/maps/semantic_map_log.jsonl`（每行一条，重启不丢）：`tail -f ~/maps/semantic_map_log.jsonl`
+
+另有服务 `/semantic_map/history`（`std_srvs/srv/Trigger`），`message` 是最近 200 条记录的 JSON 数组（网页打开时用它补齐）。
+
+一条记录：
+
+````
+{"time": "2026-09-29T10:15:02.318", "entry": "topic", "source": "asr",
+ "raw": " 我想\u200b喝水\n", "raw_visible": "␠我想⟨U+200B⟩喝水\\n", "length": 7,
+ "issues": ["首尾有空白：换行、空格", "含不可见字符：零宽空格"], "text": "我想喝水", "go": false,
+ "ok": true, "map_id": 1, "found": true, "best": "茶水间", "threshold": 0.52,
+ "candidates": [{"id": 1, "name": "茶水间", "score": 0.6767}, {"id": 3, "name": "会议室", "score": 0.41},
+                {"id": 2, "name": "前台", "score": 0.39}],
+ "rebuilt": false, "navigating": false, "elapsed_ms": 86}
+````
+
+| 字段 | 含义 |
+|---|---|
+| `entry` | 从哪个入口进来：`search` / `go` 服务，或 `topic` 话题 |
+| `source` | 发送方自己报的来源；没报时等于 `entry` |
+| `raw` | 收到的原文，一个字符都不改 |
+| `raw_visible` | 同上，但把看不见的字符写出来：`␠` 首尾空格、`\n` 换行、`⟨U+200B⟩` 零宽空格等 |
+| `issues` | 原文的问题（首尾空白、不可见字符、中间换行、乱码替换符 U+FFFD、清理后为空） |
+| `text` | 实际送进模型的文本 |
+| `candidates` | 前 3 名及得分；`found=false` 时可以看到最高分差阈值多少 |
+| `ok` / `error` | 是否处理成功；失败原因（例如 `empty query`、`no current map`） |
+| `navigating` | 是否已发出导航目标 |
+| `elapsed_ms` | 处理耗时（含模型推理） |
 
 ---
 
@@ -779,3 +854,4 @@ ros2 launch semantic_map_ros semantic_map.launch.py                       # Thor
 | 3.1.x / 3.2.4 | `patrol_count`、`patrol_duration` | PatrolControl.srv 只有 `cmd`，带这两个字段调用会报错（仿真实测） |
 | 3.2.1 | — | 补充：无限循环、朝向自动计算、失败点跳过 |
 | 5 | 无 | 新增语义地图接口 |
+| 5.5 / 5.6 | 无 | 新增话题输入 `/semantic_map/text_in`、请求来源 `source`、调试记录（`/semantic_map/debug`、`/semantic_map/history`、日志文件） |

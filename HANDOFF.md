@@ -16,6 +16,9 @@
 
 - `semantic_map_ros`：语义地图节点，服务 `/semantic_map/{search,go,rebuild}`；点位用数据库 `waypoint_node`，
   点位 JSON 可带 `description`；BGE-M3 + Qdrant；点位变化自动重建；`evaluate.py` 调阈值（默认 0.52）。
+  其他模块（ASR）接入：调服务（`data` 可带 `{"text","source"}`）或发话题 `/semantic_map/text_in`；
+  调试记录：`/semantic_map/debug`、`/semantic_map/history`、`~/maps/semantic_map_log.jsonl`、网页"调试记录"面板。
+  ASR 那边的接口还没定，定了之后按对方格式适配（接口文档 5.5 / 5.6）。
 - `g1_web`：网页控制台 `www/`（建图预览用原有的 `map_transform_node` 发布的 `/map_base64`）。
 - `g1_sim`：模拟机器人 + `sim.launch.py`（真实 rosbridge / map_manager_server / waypoint_manage）。
 - `bash tests/run_sim_e2e.sh`：36/36 通过；单元测试 5 项通过。

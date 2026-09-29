@@ -2,10 +2,12 @@
 // 需要先启动仿真（ros2 launch g1_sim sim.launch.py web_dir:=<仓库>/web），Qdrant 在运行。
 //   node tests/e2e/console.e2e.js            （环境变量 URL 默认 http://localhost:8080/?host=localhost）
 const { chromium } = require("playwright");
+const fs = require("fs");
 
 const URL = process.env.URL || "http://localhost:8080/?host=localhost";
 const SHOT_DIR = process.env.SHOT_DIR || ".";
 const CHROME = process.env.CHROME || undefined;
+const SEM_LOG = process.env.SEM_LOG || "";   // 语义地图调试记录文件（仿真里在 <sim_home>/maps/semantic_map_log.jsonl）
 const results = [];
 function check(ok, name, detail = "") {
   results.push({ ok, name, detail });
@@ -187,6 +189,50 @@ function check(ok, name, detail = "") {
     const r = await semantic("我要打印文件");
     check(r.startsWith("→ 打印室"), "新增点位后语义库自动重建", r.split("\n")[0]);
   });
+  await step("语义地图调试记录：看得到别人发来的原文和得分", async () => {
+    const entries = () => S(() => app.semLog);
+    const last = async (pred, what) => {
+      await until(async () => (await entries()).some(pred), what, 180000);
+      return (await entries()).filter(pred).pop();
+    };
+    // 网页自己的搜索也会记下来（来源 web）
+    const w = await last((r) => r.source === "web" && r.raw === "我想喝水", "网页搜索的记录");
+    check(w.ok && w.best === "茶水间" && w.candidates.length === 3 && w.issues.length === 0,
+      "网页搜索写进调试记录（来源、原文、前 3 名得分）", w.candidates.map((c) => `${c.name}:${c.score}`).join(" "));
+    // 模拟 ASR：往话题发一句带首尾空格和零宽空格的话
+    const bad = " 我想\u200b喝水 ";
+    await page.fill("#semAsrText", bad);
+    await page.click("#btnSemAsr");
+    const t = await last((r) => r.entry === "topic" && r.raw === bad, "话题输入的记录");
+    check(t.ok && t.best === "茶水间" && t.issues.some((i) => i.includes("首尾有空白")) &&
+      t.issues.some((i) => i.includes("零宽空格")) && t.raw_visible === "␠我想⟨U+200B⟩喝水␠",
+      "ASR 话题输入：照常匹配，同时标出原文里的首尾空格和零宽空格", `${t.raw_visible} ${t.issues.join("；")}`);
+    await until(async () => (await page.locator("#semDebug li .inv").count()) >= 3, "不可见字符高亮");
+    const first = await page.locator("#semDebug li").first().innerText();
+    check(first.includes("话题 text_in") && first.includes("零宽空格") && first.includes("→ 茶水间"),
+      "网页调试面板显示来源、原文问题和匹配结果", first.replace(/\n/g, " | "));
+    // 别的程序调服务，并用 JSON 标明来源
+    const r = await srv("semSearch", { data: JSON.stringify({ text: "快递到了", source: "asr" }) });
+    const res = JSON.parse(r.message);
+    check(r.success && res.source === "asr" && res.best && res.best.name === "前台",
+      "服务调用可带来源（{text, source}），应答里也有来源和问题列表", `${res.source} → ${res.best && res.best.name}`);
+    const a = await last((x) => x.source === "asr" && x.entry === "search", "asr 来源的记录");
+    check(a.text === "快递到了", "调试记录区分来源 asr（经服务 search）");
+    // 空内容：出错也要留记录
+    await S(() => publish("/semantic_map/text_in", "std_msgs/msg/String", { data: "\u200b  " }));
+    const e = await last((x) => x.entry === "topic" && x.ok === false, "出错的记录");
+    check(e.error === "empty query" && e.issues.includes("清理后是空的"), "发来空内容时记录出错原因", e.issues.join("；"));
+    await page.check("#semDebugIssues");
+    const n = await page.locator("#semDebug li").count();
+    await page.uncheck("#semDebugIssues");
+    check(n >= 2 && n < (await page.locator("#semDebug li").count()), "只看有问题的记录", `${n} 条`);
+    // 记录文件
+    if (SEM_LOG) {
+      const lines = fs.readFileSync(SEM_LOG, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+      check(lines.some((l) => l.raw === bad && l.source === "topic") && lines.some((l) => l.source === "asr"),
+        "调试记录同时写进文件（每行一条 JSON）", `${lines.length} 行`);
+    }
+  });
   await step("一句话导航：我要上厕所 → 卫生间", async () => {
     const r = await semantic("我要上厕所", true);
     check(r.includes("卫生间") && r.includes("出发"), "语义导航发出目标", r.replace(/\n/g, " | "));
@@ -275,6 +321,8 @@ function check(ok, name, detail = "") {
       15000).catch(async (e) => { throw new Error(e.message + " " + JSON.stringify(await S(() =>
         ({ points: app.points.map((p) => p.name), nogo: app.nogo.length, map: !!app.map })))); });
     check(true, "刷新页面后地图、点位、禁行线仍在");
+    await until(() => S(() => app.semLog.some((r) => r.source === "asr")), "刷新后从 /semantic_map/history 补回调试记录");
+    check(true, "刷新页面后调试记录仍在（/semantic_map/history）");
   });
 
   // ---------- 11. 模式与重定位 ----------

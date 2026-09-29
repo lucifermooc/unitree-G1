@@ -34,6 +34,15 @@
 | `/semantic_map/search` | `aid_robot_msgs/srv/SetString` | `data` = 一句话；`message` = JSON 结果（best、candidates、found） |
 | `/semantic_map/go` | `aid_robot_msgs/srv/SetString` | 搜索 + 找到就发导航 |
 | `/semantic_map/rebuild` | `std_srvs/srv/Trigger` | 手动重建当前地图的语义库 |
+| `/semantic_map/history` | `std_srvs/srv/Trigger` | 最近 200 条调试记录（JSON 数组） |
+
+| 话题 | 类型 | 作用 |
+|---|---|---|
+| `/semantic_map/text_in` | `std_msgs/msg/String` | 输入：ASR 等模块往这里发一句话（默认只搜索，`text_in_action:=go` 找到就导航） |
+| `/semantic_map/debug` | `std_msgs/msg/String` | 输出：每次请求一条 JSON（来源、原文、原文问题、前 3 名得分、结果、耗时） |
+
+`data` 可以带来源：`{"text": "我想喝水", "source": "asr"}`。调试记录同时写进 `~/maps/semantic_map_log.jsonl`，
+网页"点位与语义"页的"调试记录"实时显示所有来源的请求。
 
 ## 部署（Thor / 电脑都一样）
 

@@ -127,9 +127,19 @@
  阶段 C：查询（每说一句话一次）
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-[C1] 浏览器"语义地图"页输入"我想喝水"，点"搜索"或"去这里"
-     发送：{"op":"call_service","service":"/semantic_map/search",   （"去这里"用 /semantic_map/go）
-            "type":"aid_robot_msgs/srv/SetString","args":{"data":"我想喝水"}}
+[C1] 一句话从三个入口之一进来（data 可以是普通文本，也可以是 {"text": "...", "source": "谁发的"}）
+     ① 网页"语义地图"输入"我想喝水"，点"搜索"/"去那里"
+        → 服务 /semantic_map/search 或 /semantic_map/go，data='{"text":"我想喝水","source":"web"}'
+     ② 其他程序调同样的服务，例如 data='{"text":"我想喝水","source":"asr"}'
+     ③ ASR 往话题 /semantic_map/text_in（std_msgs/String）发 data="我想喝水"
+        （只管发不等结果；默认只搜索，text_in_action=go 时找到就导航）
+        │
+        ▼
+[C1.5] semantic_map_server  _handle()：三个入口都走这里
+     core.parse_request()：拆出 原文 raw 和 来源 source（没带 source 就记成入口名 search / go / topic）
+     core.inspect_text()：检查原文 → 问题列表，并只去掉不可见字符和首尾空白 → 送进模型的 text
+       例：raw=" 我想\u200b喝水\n" → text="我想喝水"，issues=["首尾有空白：换行、空格", "含不可见字符：零宽空格"]
+     清理后为空 → 出错 "empty query"（照样留调试记录）
         │
         ▼
 [C2] semantic_map_server  _search()：先走一遍 B1~B4（点位没变就不重建，几毫秒）
@@ -148,13 +158,13 @@
         ▼
 [C5] core.py  SemanticIndex.search()：从 payload 取出坐标，四元数算回 yaw，判断阈值
      第一名分数 0.7312 ≥ score_threshold 0.52 → found=true；否则 found=false、best=null
-     输出 JSON（作为服务应答的 message 字符串返回给浏览器）：
+     输出 JSON（作为服务应答的 message 字符串返回给调用方；话题入口没有应答）：
        {"query": "我想喝水", "found": true,
         "best": {"id": 7, "name": "茶水间", "description": "有饮水机和咖啡机，可以接水、喝水、泡茶",
                  "frame_id": "map", "x": 3.2, "y": -1.5, "z": 0.0, "yaw": 0.7854,
                  "orientation": {"x": 0.0, "y": 0.0, "z": 0.3827, "w": 0.9239}, "score": 0.7312},
         "candidates": [ {...茶水间...}, {...充电桩, "score": 0.4105}, {...前台, "score": 0.3876} ],
-        "map_id": 2, "rebuilt": false, "threshold": 0.52}
+        "map_id": 2, "rebuilt": false, "threshold": 0.52, "source": "web", "issues": []}
         │
         ├── 用的是 /semantic_map/search：到此结束，网页显示结果并在地图上高亮茶水间
         │
@@ -163,7 +173,7 @@
  阶段 D：导航
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-[D1] semantic_map_server  _on_go()：如果 /task_status 显示正在执行或暂停（status 1/4），
+[D1] semantic_map_server  _navigate()：如果 /task_status 显示正在执行或暂停（status 1/4），
      先调 /patrol_control {cmd: "cancel"}，等 0.5 秒（waypoint_manage 有任务时会忽略新目标）
         │
         ▼
@@ -180,6 +190,25 @@
         ▼
 [D4] Nav2 规划路径、控制机器人走到 (3.2, -1.5)，朝向 45°
      过程中 waypoint_manage 发布 /task_status，网页订阅后显示"执行中 / 已完成 / 失败"
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 阶段 E：调试记录（每次请求都有，成功失败都记；在 C1.5 之后、应答之前写）
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[E1] _handle() 的 finally：拼一条记录
+       {"time", "entry", "source", "raw"（原文一字不改）, "raw_visible"（␠ \n ⟨U+200B⟩ 标出看不见的字符）,
+        "length", "issues", "text", "go", "ok"/"error", "map_id", "found", "best", "threshold",
+        "candidates": [{id, name, score} × 3], "rebuilt", "navigating", "elapsed_ms"}
+        │
+        ├──▶ 话题 /semantic_map/debug（std_msgs/String，内容是这条 JSON）→ 网页调试面板实时显示
+        ├──▶ 内存里最近 200 条 → 服务 /semantic_map/history（网页打开/刷新时补齐）
+        └──▶ 文件 ~/maps/semantic_map_log.jsonl 追加一行（超过 20 MB 改名 .1 再重写）
+     原文有问题时，节点日志还会打一行 WARN：input from asr has issues: [...] raw=␠我想⟨U+200B⟩喝水\n
+
+     怎么判断是谁的问题：
+       raw / issues 就不对（错字、多了空格换行、乱码）            → 发送方（ASR）的问题
+       raw 没问题，但最高分低于阈值，或第一名不是想要的地点    → 点位描述或阈值的问题
+       ok=false                                               → 看 error（没选地图、后端服务没起来等）
 ```
 
 ---
@@ -319,6 +348,7 @@ python3 -m semantic_map_ros.evaluate --db ~/maps/db.sqlite --queries config/eval
 | 向量 + payload | Qdrant collection `semantic_map_<map_id>`，文件在 `~/maps/qdrant_storage` | semantic_map_server | semantic_map_server |
 | BGE-M3 模型文件 | `~/.cache/huggingface/hub/models--BAAI--bge-m3` | 第一次加载时下载 | semantic_map_server |
 | 指纹 | semantic_map_server 进程内存 | semantic_map_server | semantic_map_server |
+| 调试记录 | `~/maps/semantic_map_log.jsonl` + 进程内存最近 200 条 | semantic_map_server | 网页、`ros2 topic echo /semantic_map/debug`、人工查看 |
 
 数据库是唯一的"真数据"；Qdrant 里的东西随时可以删掉，下一次搜索会从数据库重新建出来。
 
@@ -338,8 +368,10 @@ python3 -m semantic_map_ros.evaluate --db ~/maps/db.sqlite --queries config/eval
 | B6、C3 | `semantic_map_ros/semantic_map_ros/embedder.py` | `Embedder.encode` |
 | B7~B8 | `core.py` | `SemanticIndex.rebuild` |
 | C4~C5 | `core.py` | `SemanticIndex.search`、`yaw_of` |
-| C1、结果显示 | `g1_web/www/app.js` | `semantic`、`renderSemantic` |
-| D1~D2 | `semantic_map_server.py` | `_on_go`、`_goal` |
+| C1、结果显示 | `g1_web/www/app.js` | `semantic`、`renderSemantic`、`sendAsrTest` |
+| C1.5 | `semantic_map_server.py` / `core.py` | `_handle`、`_on_text_in`、`parse_request`、`inspect_text` |
+| D1~D2 | `semantic_map_server.py` | `_navigate`、`_goal` |
+| E1 | `semantic_map_server.py` / `debug_log.py` / `app.js` | `_handle`、`DebugLog`、`visible`、`renderSemLog` |
 | D3 | `aid_robot_py/aid_robot_py/waypoint_manage.py`（原有） | `nav_pose_callback`、`send_next_goal` |
 
 说明：图中向量的具体数值和相似度分数是示意，实际数值以模型输出为准；其余字段名、格式和流程都与代码一致。
