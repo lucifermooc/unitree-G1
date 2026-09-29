@@ -11,7 +11,7 @@ lightning_ws/                       G1 的 ROS2 工作区（Jazzy）
     g1_nav_bridge, livox_*, realsense-ros, librealsense, unitree_*, point_filter ...
                                     ← 原有后端，原样保留，未做任何修改
     semantic_map_ros/               【新增】语义地图节点：一句话 → 位置点 → /nav_to_pose
-    g1_web/                         【新增】网页控制台（www/ 静态文件 + 网页服务 launch）
+    g1_web/                         【新增】网页控制台（www/ 静态文件，在电脑上打开即可，不用放到 Thor）
     g1_sim/                         【新增】无硬件仿真：模拟机器人 + 仿真 launch（只用于测试）
 tests/
   run_sim_e2e.sh                    一键全流程测试（编译 → 单元测试 → 仿真 → 浏览器端到端测试）
@@ -20,17 +20,22 @@ tests/
 
 ## 在真机（Thor）上用
 
-原有启动流程不变（`stop_all.launch.py` → `robot.launch.py`，rosbridge 默认已启动）。新增的两部分单独启动：
+原有启动流程不变（`stop_all.launch.py` → `robot.launch.py`，rosbridge 和建图预览 `map_transform_node` 默认已启动）。
+Thor 上只需要新增语义地图：
 
 ```bash
-colcon build --packages-select semantic_map_ros g1_web      # 只编译新增的包
-# 语义地图（先按 src/semantic_map_ros/README.md 装依赖、启动 Qdrant）
+colcon build --packages-select semantic_map_ros             # 只编译这一个新包
+# 先按 src/semantic_map_ros/README.md 装依赖、启动 Qdrant
 ros2 launch semantic_map_ros semantic_map.launch.py use_fp16:=true
-# 网页控制台
-ros2 launch g1_web web.launch.py
 ```
 
-浏览器打开 `http://<Thor的IP>:8080`，连接地址填 Thor 的 IP。
+网页控制台（`g1_web`）只是静态网页，**不用放到 Thor**，在自己电脑上打开：
+
+```bash
+cd lightning_ws/src/g1_web/www && python3 -m http.server 8080
+```
+
+浏览器打开 `http://localhost:8080/?host=<Thor的IP>`（或打开后在连接地址里填 Thor 的 IP）。
 
 网页控制台只保留接口文档里的功能：地图管理（使用/重命名/删除）、建图（实时预览、保存）、点位（在地图上拖动新建、编辑、删除）、
 单点导航（暂停/继续/取消）、巡逻、禁行线、橡皮擦、模式切换、重定位（机器人端暂未实现），外加语义地图（搜索、一句话导航）。

@@ -14,7 +14,8 @@
 - ⚠ 服务请求里**不能带服务定义里没有的字段**，否则 rosbridge 直接报错
   （例如 `Message type ... does not have a field patrol_count`）。
 - 机器人上的 rosbridge 配置 `default_call_service_timeout: 0.0`（服务调用不超时）。
-- 网页控制台：`ros2 launch g1_web web.launch.py`，浏览器打开 `http://<机器人IP>:8080`。
+- 网页控制台：静态网页，不用放到机器人上。在电脑上 `cd lightning_ws/src/g1_web/www && python3 -m http.server 8080`，
+  浏览器打开 `http://localhost:8080/?host=<机器人IP>`。
 
 ---
 
