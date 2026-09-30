@@ -53,6 +53,13 @@ class LocGuardConfigTests(unittest.TestCase):
         self.assertLessEqual(self.guard['init_yaw_search_deg'], 30.0)
         self.assertGreater(self.guard['init_yaw_search_step_deg'], 0)
 
+    def test_ndt_jump_gate(self):
+        # 单帧跳变检查：要比 LIO 单帧误差（厘米级）大得多，又要挡住导航时 0.3~0.6 m 的错配
+        self.assertGreater(self.guard['max_ndt_jump_m'], 0.05)
+        self.assertLessEqual(self.guard['max_ndt_jump_m'], 0.3)
+        self.assertLessEqual(self.guard['max_ndt_jump_deg'], 5.0)
+        self.assertGreater(self.guard['max_ndt_jump_deg'], 0.5)
+
     def test_loc_input_keys_are_read(self):
         # 2026-09-30 投影关键帧 A/B 开关：默认保持上游行为（带历史关键帧投影）
         loc_input = self.config['loc_input']
