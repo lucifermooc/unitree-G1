@@ -65,6 +65,10 @@ class LidarLoc {
         int fast_converge_max_frames_ = 50;
         /// 跟踪阶段 NDT 分值低于该值时不采信本次匹配（只按 LO 递推），0 = 关闭（原行为：任何分值都按 balance 融合）
         double track_min_score_ = 0.0;
+        /// 单帧跳变检查（跟踪阶段）：NDT 结果相对 LIO 预测的平面偏差超过该值时本帧不采信（只按 LO 递推）；0 = 关闭。
+        /// 航向只看 yaw（NDT 的 roll/pitch 常偏几度，由 gravity_constrain 另行修正）。配置在 loc_guard 段。
+        double max_ndt_jump_m_ = 0.0;
+        double max_ndt_jump_deg_ = 0.0;
 
         /// 一致性守护（见 loc_guard.h），配置在 yaml 的 loc_guard 段
         LocGuard::Options guard_;
@@ -267,6 +271,7 @@ class LidarLoc {
     std::atomic_bool converged_{false};  // 初始化后快速收敛阶段是否结束（LIO 线程读取）
     int fast_converge_frames_ = 0;       // 快速收敛阶段已处理的定位次数
     int fast_converge_ok_cnt_ = 0;       // 连续残差达标次数
+    long ndt_jump_rejects_ = 0;          // 单帧跳变检查拒绝的累计次数
 
     double current_timestamp_ = 0;  // 本次输入的时间戳
     double last_timestamp_ = 0;     // 上次输入的时间戳

@@ -139,6 +139,8 @@ bool LidarLoc::Init(const std::string& config_path) {
         yaml.GetOptional("loc_guard", "odom_tol_ratio", g.odom_tol_ratio_);
         yaml.GetOptional("loc_guard", "odom_tol_deg", g.odom_tol_deg_);
         yaml.GetOptional("loc_guard", "odom_persist_frames", g.odom_persist_frames_);
+        yaml.GetOptional("loc_guard", "max_ndt_jump_m", options_.max_ndt_jump_m_);
+        yaml.GetOptional("loc_guard", "max_ndt_jump_deg", options_.max_ndt_jump_deg_);
         yaml.GetOptional("loc_guard", "init_yaw_search_deg", options_.init_yaw_search_deg_);
         yaml.GetOptional("loc_guard", "init_yaw_search_step_deg", options_.init_yaw_search_step_deg_);
         guard_ = LocGuard(g);
@@ -147,7 +149,8 @@ bool LidarLoc::Init(const std::string& config_path) {
                   << g.window_dist_ << " m, max drift " << g.max_drift_m_ << " m (static " << g.max_drift_static_m_
                   << " m when path < " << g.static_travel_m_ << " m) / " << g.max_drift_deg_ << " deg, odom tol "
                   << g.odom_tol_m_ << " m + " << g.odom_tol_ratio_ << " x travel / " << g.odom_tol_deg_ << " deg x "
-                  << g.odom_persist_frames_ << " frames; init yaw search +-" << options_.init_yaw_search_deg_ << " deg";
+                  << g.odom_persist_frames_ << " frames; ndt jump gate " << options_.max_ndt_jump_m_ << " m / "
+                  << options_.max_ndt_jump_deg_ << " deg; init yaw search +-" << options_.init_yaw_search_deg_ << " deg";
     }
 
     lidar_loc::grid_search_angle_step = yaml.GetValue<double>("lidar_loc", "grid_search_angle_step");
@@ -793,6 +796,21 @@ void LidarLoc::Align(const CloudPtr& input) {
     if (converged_ && fitness_score < options_.track_min_score_) {
         LOG(INFO) << "low score " << fitness_score << " < " << options_.track_min_score_ << ", follow LO only";
         balance = 0.0;
+    }
+    // 单帧跳变检查（2026-09-30）：LIO 一帧内的误差只有厘米级，NDT 结果离 LIO 预测太远多半是错配（走廊沿轴向退化，
+    // 分值照样高）。本帧不采信，只按 LO 递推。代价：累计误差一旦超过阈值，NDT 就拉不回来（等同纯 LIO）。
+    if (converged_ && options_.max_ndt_jump_m_ > 0) {
+        const double jump_m = ndt_residual.translation().head<2>().norm();
+        const Mat3d R = ndt_residual.rotationMatrix();
+        const double jump_deg = std::fabs(std::atan2(R(1, 0), R(0, 0))) * 180.0 / M_PI;
+        if (jump_m > options_.max_ndt_jump_m_ ||
+            (options_.max_ndt_jump_deg_ > 0 && jump_deg > options_.max_ndt_jump_deg_)) {
+            ++ndt_jump_rejects_;
+            LOG(INFO) << "ndt jump rejected: " << jump_m << " m / " << jump_deg << " deg (limit "
+                      << options_.max_ndt_jump_m_ << " m / " << options_.max_ndt_jump_deg_ << " deg), score "
+                      << fitness_score << ", total rejects " << ndt_jump_rejects_;
+            balance = 0.0;
+        }
     }
     // 一致性守护：窗口内累积修正超限且 LIO / 腿式里程计不支持时冻结修正并退回（快速收敛阶段不管）
     SE3 guard_pose;

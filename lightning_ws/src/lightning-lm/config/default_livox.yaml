@@ -164,6 +164,10 @@ loc_guard:
   odom_tol_ratio: 0.15      # 09-29 实测误差/行程 p95 10.9%、航向 p95 6°
   odom_tol_deg: 10.0
   odom_persist_frames: 5    # 里程计连续 N 帧不一致才怪 LIO（连续 N 帧一致才从 LIO_SUSPECT 改判 NDT）
+  # 单帧跳变检查：NDT 结果离 LIO 预测超过该值（平面距离 / yaw）本帧不采信。LIO 一帧内误差只有厘米级；
+  # 09-30 离线统计导航段 NDT 原始残差 >0.3 m 占 25~46%。代价：累计误差超过该值后 NDT 拉不回来（等同纯 LIO）。0 = 关闭
+  max_ndt_jump_m: 0.2
+  max_ndt_jump_deg: 3.0
   init_yaw_search_deg: 15.0 # /initialpose 重定位时在给定航向左右搜索的范围；0 = 不搜
   init_yaw_search_step_deg: 3.0
 # 送给激光定位（NDT）的点云。上游行为：当前帧 + 最多 5 个历史关键帧各取最早 1001 点（按 LIO 相对位姿摆到当前帧）。
