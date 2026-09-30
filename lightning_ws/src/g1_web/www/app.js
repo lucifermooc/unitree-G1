@@ -29,7 +29,8 @@ const SRV = {
 };
 const TASK_STATUS = ["空闲", "执行中", "成功", "失败", "暂停", "已取消"];
 const TASK_TYPE = ["单点导航", "巡逻"];
-const MODE_NAME = { idle: "空闲", mapping: "建图", localization: "定位", patrol: "导航", remote_control: "遥控" };
+const MODE_NAME = { idle: "空闲", mapping: "建图", continue_mapping: "继续建图", localization: "定位", patrol: "导航",
+  remote_control: "遥控" };
 
 const S = {
   ros: null, connected: false,
@@ -239,9 +240,9 @@ function renderMaps() {
 }
 function confirmThen(btn, text, fn) {  // 两次点击确认（不用弹窗）
   if (btn.dataset.armed) { fn(); return; }
-  const old = btn.textContent;
+  const old = btn.innerHTML;  // 模式按钮里有 <small>，按 HTML 还原
   btn.dataset.armed = "1"; btn.textContent = text;
-  setTimeout(() => { delete btn.dataset.armed; btn.textContent = old; }, 3000);
+  setTimeout(() => { delete btn.dataset.armed; btn.innerHTML = old; }, 3000);
 }
 async function useMap(m) {
   const r = await call(SRV.setCurrent, { id: m.id });
@@ -304,12 +305,20 @@ async function startMapping() {
   const r = await call(SRV.modeSet, { action: "mapping" });
   if (r.message !== "ok") throw new Error(`进入建图失败：${r.message}`);
   S.map = null; startPreview(); draw();
-  toast("开始建图");
+  toast("开始建图（新地图）");
+}
+async function continueMapping() {
+  if (!S.mapId) throw new Error("先在“地图”里使用一张地图，再继续建图");
+  const r = await call(SRV.modeSet, { action: "continue_mapping" });
+  if (r.message !== "ok") throw new Error(`继续建图失败：${r.message}`);
+  if (!$("mapName").value.trim()) $("mapName").value = `${S.mapName}-续建`;
+  startPreview(); draw();  // 先显示当前地图，收到实时地图后替换
+  toast(`在“${S.mapName}”上继续建图`);
 }
 async function cancelMapping() {
   const r = await call(SRV.modeSet, { action: "idle" });
   stopPreview();
-  toast(r.message === "ok" ? "已取消建图，地图未保存" : `取消失败：${r.message}`);
+  toast(r.message === "ok" ? "已取消建图，地图未保存（进入定位时会重新加载当前地图）" : `取消失败：${r.message}`);
   await loadCurrentMap();
 }
 async function saveMapping() {
@@ -637,12 +646,13 @@ function relocate(x, y, yaw) {
   publish("/initialpose", "geometry_msgs/msg/PoseWithCovarianceStamped",
     { header: pose.header, pose: { pose: pose.pose, covariance: cov } });
   publish("/start_init_pose", "geometry_msgs/msg/PoseStamped", pose);
-  toast("已发送重定位（机器人端暂未实现）");
+  toast("已发送重定位");
 }
 async function setMode(action) {
   const r = await call(SRV.modeSet, { action });
   toast(r.message === "ok" ? `已切换到${MODE_NAME[action]}` : `切换失败：${r.message}`);
   if (action === "mapping" && r.message === "ok") { S.map = null; startPreview(); }
+  if (action === "continue_mapping" && r.message === "ok") startPreview();
 }
 
 // ---------------- 画布 ----------------
@@ -853,7 +863,8 @@ $("connForm").addEventListener("submit", (e) => { e.preventDefault(); connect($(
 $("btnFit").onclick = fitView;
 $("btnCenterRobot").onclick = () => S.robot && centerOn(S.robot.x, S.robot.y);
 $("btnMapsRefresh").onclick = () => guard(loadMaps);
-$("btnMapStart").onclick = () => guard(startMapping);
+$("btnMapStart").onclick = (e) => confirmThen(e.currentTarget, "再点一次：清空并新建", () => guard(startMapping));
+$("btnMapContinue").onclick = () => guard(continueMapping);
 $("btnMapCancel").onclick = () => guard(cancelMapping);
 $("btnMapSave").onclick = () => guard(saveMapping);
 $("pointForm").addEventListener("submit", (e) => { e.preventDefault(); guard(savePoint); });
@@ -888,7 +899,11 @@ $("btnNogoSave").onclick = () => guard(saveNogo);
 $("btnEraser").onclick = () => setTool(S.tool === "eraser" ? null : "eraser");
 $("btnEraserApply").onclick = () => guard(applyEraser);
 $("btnEraserClear").onclick = () => { S.eraser = []; draw(); };
-document.querySelectorAll(".modes button").forEach((b) => { b.onclick = () => guard(() => setMode(b.dataset.mode)); });
+document.querySelectorAll(".modes button").forEach((b) => {
+  b.onclick = () => (b.dataset.mode === "mapping"  // 新建图会清掉当前实时地图，要确认
+    ? confirmThen(b, "再点一次：清空并新建", () => guard(() => setMode("mapping")))
+    : guard(() => setMode(b.dataset.mode)));
+});
 $("btnRelocate").onclick = () => setTool(S.tool === "relocate" ? null : "relocate");
 $("btnRelocateZero").onclick = () => relocate(0, 0, 0);
 window.addEventListener("resize", resize);

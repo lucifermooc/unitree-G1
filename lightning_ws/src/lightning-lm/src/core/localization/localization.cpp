@@ -68,6 +68,8 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
     options_.enable_lidar_odom_skip_ = yaml.GetValue<bool>("system", "enable_lidar_odom_skip");
     options_.lidar_odom_skip_num_ = yaml.GetValue<int>("system", "lidar_odom_skip_num");
     options_.loc_on_kf_ = yaml.GetValue<bool>("lidar_loc", "loc_on_kf");
+    yaml.GetOptional("loc_input", "proj_kfs", options_.loc_proj_kfs_);
+    LOG(INFO) << "lidar loc input: current scan" << (options_.loc_proj_kfs_ ? " + projected keyframes" : " only");
 
     lidar_odom_proc_cloud_.SetMaxSize(1);
     lidar_loc_proc_cloud_.SetMaxSize(1);
@@ -186,8 +188,8 @@ void Localization::ProcessLivoxLidarMsg(const livox_ros_driver2::msg::CustomMsg:
 // 不在这里摆到 map 系：loc_result_ 是外推到最新 IMU 时刻的位姿，与扫描时刻相差处理延迟，
 // 运动（尤其转向）时整帧点云会被多转一个角度，墙面点被甩进空地成为假障碍。
 // 由下游按扫描时刻查 TF（map->base_link 历史 200Hz）即可严格对齐。frame_id 由 LocSystem 填写。
-// 注意必须在 lio_->GetProjCloud() 之前调用：那个函数会把投影关键帧点【原地追加】到
-// scan_undistort_ 里，之后再取就不是纯净的单帧了。
+// 2026-09-30 之前 lio_->GetProjCloud() 会把投影关键帧点【原地追加】到 scan_undistort_，所以本函数必须先调用；
+// 现在投影在副本上做，顺序已无所谓，保留原顺序。
 void Localization::PublishRegisteredScan() {
     if (!pointcloud_world_callback_ || lio_ == nullptr || !loc_result_.valid_) {
         return;
@@ -236,7 +238,8 @@ void Localization::LidarOdomProcCloud(CloudPtr cloud) {
 
     /// 获得lio的关键帧
 
-    auto scan = lio_->GetProjCloud();
+    // 送激光定位的点云（副本，LIO 之后不会再改它）：当前帧 + 历史关键帧投影，或只用当前帧（yaml loc_input.proj_kfs）
+    CloudPtr scan = options_.loc_proj_kfs_ ? lio_->GetProjCloud() : CloudPtr(new PointCloudType(*lio_->GetScanUndist()));
 
     // 快速收敛阶段（初始化后到残差达标前）每帧都做激光定位，不等关键帧（静止时关键帧 2 s 才一个）
     if (options_.loc_on_kf_ && lidar_loc_->Converged()) {
@@ -278,7 +281,15 @@ void Localization::LidarLocProcCloud(CloudPtr scan_undist) {
     lidar_loc_->ProcessCloud(scan_undist);
 
     auto res = lidar_loc_->GetLocalizationResult();
+    if (lidar_loc_->ConsumeExternalReinit()) {
+        // 人工重定位后位姿会跳变；PGO 窗口里还是旧位姿，不重置会把跳变平滑成缓慢漂移
+        pgo_->Reset();
+    }
     pgo_->ProcessLidarLoc(res);
+
+    if (lidar_loc_result_callback_) {
+        lidar_loc_result_callback_(res);
+    }
 
     if (ui_) {
         // Twi with Til, here pose means Twl, thus Til=I
@@ -381,11 +392,23 @@ void Localization::Finish() {
     lidar_odom_proc_cloud_.Quit();
 }
 
-void Localization::SetExternalPose(const Eigen::Quaterniond& q, const Eigen::Vector3d& t) {
+void Localization::SetExternalPose(const Eigen::Quaterniond& q, const Eigen::Vector3d& t, bool yaw_search) {
     UL lock(global_mutex_);
     /// 设置外部重定位的pose
     if (lidar_loc_) {
-        lidar_loc_->SetInitialPose(SE3(q, t));
+        lidar_loc_->SetInitialPose(SE3(q, t), yaw_search);
+    }
+}
+
+void Localization::SetDebugNdtBias(double bx, double by, double t_start, double t_end) {
+    if (lidar_loc_) {
+        lidar_loc_->SetDebugNdtBias(bx, by, t_start, t_end);
+    }
+}
+
+void Localization::ProcessLegOdom(double timestamp, const SE3& pose) {
+    if (lidar_loc_) {
+        lidar_loc_->ProcessLegOdom(timestamp, pose);
     }
 }
 

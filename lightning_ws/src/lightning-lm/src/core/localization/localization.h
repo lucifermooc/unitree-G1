@@ -40,6 +40,7 @@ class Localization {
         bool enable_lidar_loc_rviz_ = false;   // 是否允许调试用rviz
         int lidar_loc_skip_num_ = 4;           // 如果允许跳帧，跳多少帧
         bool loc_on_kf_ = false;
+        bool loc_proj_kfs_ = true;  // 送 NDT 的点云带历史关键帧投影（上游行为）；false 只用当前帧（yaml loc_input.proj_kfs）
     };
 
     Localization(Options options = Options());
@@ -62,8 +63,14 @@ class Localization {
 
     // void ProcessOdomMsg(const nav_msgs::msg::Odometry::SharedPtr odom_msg) override;
 
-    /// 由外部设置pose，适用于手动重定位
-    void SetExternalPose(const Eigen::Quaterniond& q, const Eigen::Vector3d& t);
+    /// 由外部设置pose，适用于手动重定位；yaw_search 时在给定航向附近搜索（人工给的航向不准）
+    void SetExternalPose(const Eigen::Quaterniond& q, const Eigen::Vector3d& t, bool yaw_search = false);
+
+    /// 仅离线测试：注入 NDT 偏差，见 LidarLoc::SetDebugNdtBias
+    void SetDebugNdtBias(double bx, double by, double t_start, double t_end);
+
+    /// 腿式里程计位姿（雷达系、本机时钟），只供一致性守护使用
+    void ProcessLegOdom(double timestamp, const SE3& pose);
 
     /// TODO: 其他初始化逻辑
 
@@ -80,6 +87,7 @@ class Localization {
     using LocStateCallback = std::function<void(const std_msgs::msg::Int32& state)>;
     using PointcloudBodyCallback = std::function<void(const sensor_msgs::msg::PointCloud2& pointcloud)>;
     using PointcloudWorldCallback = std::function<void(const sensor_msgs::msg::PointCloud2& pointcloud)>;
+    using LocResultCallback = std::function<void(const LocalizationResult& lidar_loc_result)>;
 
     void SetTFCallback(TFCallback&& callback);
 
@@ -87,6 +95,9 @@ class Localization {
     /// 并按当次定位位姿摆到 map 系的点云，与 UI 里渲染的是同一份数据。
     /// 纯旁路输出，不回写任何算法状态。
     void SetPointcloudWorldCallback(PointcloudWorldCallback&& callback);
+
+    /// 每次激光定位后回调（含一致性守护状态），用于发布 /lightning/loc_status
+    void SetLidarLocResultCallback(LocResultCallback&& callback) { lidar_loc_result_callback_ = callback; }
 
     /// 每帧经回调发出 LIO 去畸变扫描（雷达系，时间戳 = 该帧 lidar_end_time）
     void PublishRegisteredScan();
@@ -134,6 +145,7 @@ class Localization {
     LocStateCallback loc_state_callback_;
     PointcloudBodyCallback pointcloud_body_callback_;
     PointcloudWorldCallback pointcloud_world_callback_;
+    LocResultCallback lidar_loc_result_callback_;
 
     double map_z_offset_ = 0.0;  // map 帧竖直偏移，见 SetMapZOffset
 

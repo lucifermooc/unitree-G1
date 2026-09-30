@@ -6,6 +6,7 @@
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include "common/eigen_types.h"
 #include "common/nav_state.h"
+#include "core/localization/lidar_loc/loc_guard.h"
 
 namespace lightning::loc {
 
@@ -28,6 +29,7 @@ struct LocalizationResult {
     SE3 pose_;                                              // 定位的位置和姿态（lidarLoc和PGO共用此变量）
     bool valid_ = false;                                    // 标志此定位是否有效
     LocalizationStatus status_ = LocalizationStatus::IDLE;  // 定位状态位
+    LocGuard::Status guard_status_;                         // 一致性守护状态（激光定位写入）
 
     /// 对内部分
     bool lidar_loc_valid_ = false;        // 该时刻lidarLoc是否有效

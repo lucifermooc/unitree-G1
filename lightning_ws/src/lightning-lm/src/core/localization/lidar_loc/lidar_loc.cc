@@ -117,6 +117,39 @@ bool LidarLoc::Init(const std::string& config_path) {
               << " m, max " << options_.fast_converge_max_frames_ << " frames), track min score "
               << options_.track_min_score_;
 
+    // 一致性守护：独立的 loc_guard 段（老配置没有该段时按默认值开启）
+    {
+        auto& g = options_.guard_;
+        yaml.GetOptional("loc_guard", "enabled", g.enabled_);
+        std::string action = g.freeze_ ? "freeze" : "warn";
+        yaml.GetOptional("loc_guard", "action", action);
+        g.freeze_ = action != "warn";
+        yaml.GetOptional("loc_guard", "rollback", g.rollback_);
+        yaml.GetOptional("loc_guard", "window_sec", g.window_sec_);
+        yaml.GetOptional("loc_guard", "window_dist", g.window_dist_);
+        yaml.GetOptional("loc_guard", "max_drift_m", g.max_drift_m_);
+        yaml.GetOptional("loc_guard", "max_drift_deg", g.max_drift_deg_);
+        yaml.GetOptional("loc_guard", "static_travel_m", g.static_travel_m_);
+        yaml.GetOptional("loc_guard", "max_drift_static_m", g.max_drift_static_m_);
+        yaml.GetOptional("loc_guard", "recover_frames", g.recover_frames_);
+        yaml.GetOptional("loc_guard", "recover_res_m", g.recover_res_m_);
+        yaml.GetOptional("loc_guard", "recover_res_deg", g.recover_res_deg_);
+        yaml.GetOptional("loc_guard", "reloc_hint_frames", g.reloc_hint_frames_);
+        yaml.GetOptional("loc_guard", "odom_tol_m", g.odom_tol_m_);
+        yaml.GetOptional("loc_guard", "odom_tol_ratio", g.odom_tol_ratio_);
+        yaml.GetOptional("loc_guard", "odom_tol_deg", g.odom_tol_deg_);
+        yaml.GetOptional("loc_guard", "odom_persist_frames", g.odom_persist_frames_);
+        yaml.GetOptional("loc_guard", "init_yaw_search_deg", options_.init_yaw_search_deg_);
+        yaml.GetOptional("loc_guard", "init_yaw_search_step_deg", options_.init_yaw_search_step_deg_);
+        guard_ = LocGuard(g);
+        LOG(INFO) << "loc guard: " << (g.enabled_ ? (g.freeze_ ? "freeze" : "warn only") : "disabled")
+                  << (g.freeze_ && g.rollback_ ? " + rollback" : "") << ", window " << g.window_sec_ << " s / "
+                  << g.window_dist_ << " m, max drift " << g.max_drift_m_ << " m (static " << g.max_drift_static_m_
+                  << " m when path < " << g.static_travel_m_ << " m) / " << g.max_drift_deg_ << " deg, odom tol "
+                  << g.odom_tol_m_ << " m + " << g.odom_tol_ratio_ << " x travel / " << g.odom_tol_deg_ << " deg x "
+                  << g.odom_persist_frames_ << " frames; init yaw search +-" << options_.init_yaw_search_deg_ << " deg";
+    }
+
     lidar_loc::grid_search_angle_step = yaml.GetValue<double>("lidar_loc", "grid_search_angle_step");
     lidar_loc::grid_search_angle_range = yaml.GetValue<double>("lidar_loc", "grid_search_angle_range");
 
@@ -227,6 +260,25 @@ bool LidarLoc::ProcessDR(const NavState& state) {
     return true;
 }
 
+void LidarLoc::ProcessLegOdom(double timestamp, const SE3& pose) {
+    UL lock(leg_odom_mutex_);
+    if (!leg_odom_queue_.empty() && timestamp <= leg_odom_queue_.back().timestamp_) {
+        return;
+    }
+    leg_odom_queue_.emplace_back(timestamp, pose);
+    while (leg_odom_queue_.size() > 2000) {  // /odom 20~500 Hz，只需覆盖一次激光定位的延迟
+        leg_odom_queue_.pop_front();
+    }
+}
+
+bool LidarLoc::LegOdomAt(double timestamp, SE3& pose) {
+    UL lock(leg_odom_mutex_);
+    TimedPose match;
+    return math::PoseInterp<TimedPose>(
+        timestamp, leg_odom_queue_, [](const TimedPose& p) { return p.timestamp_; },
+        [](const TimedPose& p) { return p.pose_; }, pose, match, 0.2);
+}
+
 bool LidarLoc::ProcessLO(const NavState& state) {
     /// 理论上相对定位是按时间顺序到达的
     UL lock(lo_pose_mutex_);
@@ -261,7 +313,8 @@ bool LidarLoc::ProcessLO(const NavState& state) {
     return true;
 }
 
-bool LidarLoc::YawSearch(SE3& pose, double& confidence, CloudPtr input, CloudPtr output) {
+bool LidarLoc::YawSearch(SE3& pose, double& confidence, CloudPtr input, CloudPtr output, double range_deg,
+                         double step_deg) {
     SE3 init_pose = pose;
     auto RPYXYZ = math::SE3ToRollPitchYaw(init_pose);
     double init_yaw = RPYXYZ.yaw;
@@ -269,9 +322,9 @@ bool LidarLoc::YawSearch(SE3& pose, double& confidence, CloudPtr input, CloudPtr
     confidence = 0;
     bool yaw_search_success = false;
 
-    int step = lidar_loc::grid_search_angle_step;
-    double radius = lidar_loc::grid_search_angle_range * constant::kDEG2RAD;
-    double angle_search_step = 2 * radius / step;
+    // 含两端点、以给定航向为中心对称（上游写法是 [-range, range) 且不含中心）
+    const int half = std::max(0, static_cast<int>(std::round(range_deg / std::max(step_deg, 0.1))));
+    const int step = 2 * half + 1;
 
     std::vector<double> searched_yaw;
     std::vector<double> scores(step);
@@ -279,7 +332,7 @@ bool LidarLoc::YawSearch(SE3& pose, double& confidence, CloudPtr input, CloudPtr
     std::vector<SE3> pose_opti(step);
 
     for (int i = 0; i < step; ++i) {
-        double search_yaw = init_yaw + i * angle_search_step - radius;
+        double search_yaw = init_yaw + (i - half) * step_deg * constant::kDEG2RAD;
         searched_yaw.emplace_back(search_yaw);
         index.emplace_back(i);
     }
@@ -299,14 +352,20 @@ bool LidarLoc::YawSearch(SE3& pose, double& confidence, CloudPtr input, CloudPtr
         pose_opti[i] = pose_esti;
     });
 
-    // find best match
-    auto best_score_idx = std::max_element(scores.begin(), scores.end()) - scores.begin();
-    confidence = scores.at(best_score_idx);
-    pose = pose_opti.at(best_score_idx);
-
-    /// 高分辨率
-    if (confidence > options_.min_init_confidence_) {
-        Localize(pose, confidence, input, output, false);
+    /// 高分辨率：粗分辨率（5 m 体素）分值与精匹配不在一个量级，不能拿它和 min_init_confidence 比；
+    /// 对粗分最高的前 3 个候选都做精匹配，按精匹配分值取最好的
+    std::sort(index.begin(), index.end(), [&](int a, int b) { return scores[a] > scores[b]; });
+    confidence = 0;
+    for (size_t k = 0; k < std::min<size_t>(3, index.size()); ++k) {
+        SE3 candidate = pose_opti[index[k]];
+        double fine_score = 0;
+        Localize(candidate, fine_score, input, output, false);
+        LOG(INFO) << "yaw search candidate " << searched_yaw[index[k]] * constant::kRAD2DEG << " deg: rough "
+                  << scores[index[k]] << ", fine " << fine_score;
+        if (fine_score > confidence) {
+            confidence = fine_score;
+            pose = candidate;
+        }
     }
 
     if (confidence > options_.min_init_confidence_) {
@@ -324,15 +383,20 @@ bool LidarLoc::YawSearch(SE3& pose, double& confidence, CloudPtr input, CloudPtr
     return yaw_search_success;
 }
 
-bool LidarLoc::InitWithFP(CloudPtr input, const SE3& fp_pose) {
+bool LidarLoc::InitWithFP(CloudPtr input, const SE3& fp_pose, bool yaw_search) {
     assert(input != nullptr && !input->empty());
 
     // 使用功能点的位置进行定位初始化
     double fitness_score;
     SE3 pose_esti = fp_pose;
     CloudPtr output_cloud(new PointCloudType);
-    // loc_inited_ = YawSearch(pose_esti, fitness_score, input, output_cloud);
-    loc_inited_ = Localize(pose_esti, fitness_score, input, output_cloud);
+    // 上游全范围 YawSearch 会选错角度（issue #123）；只在人工给了大致位姿时做窄范围搜索
+    if (yaw_search && options_.init_yaw_search_deg_ > 0) {
+        loc_inited_ = YawSearch(pose_esti, fitness_score, input, output_cloud, options_.init_yaw_search_deg_,
+                                options_.init_yaw_search_step_deg_);
+    } else {
+        loc_inited_ = Localize(pose_esti, fitness_score, input, output_cloud);
+    }
     if (loc_inited_ && options_.gravity_constrain_) {
         pose_esti = ApplyGravityConstraint(pose_esti, "init");
     }
@@ -365,6 +429,9 @@ bool LidarLoc::InitWithFP(CloudPtr input, const SE3& fp_pose) {
 
         //  定位成功，则清空失败记录
         fp_init_fail_pose_vec_.clear();
+
+        // 重新初始化后守护从头开始
+        guard_.Reset();
 
         // 进入快速收敛阶段
         fast_converge_frames_ = 0;
@@ -473,14 +540,16 @@ void LidarLoc::UpdateMapThread() {
     }
 }
 
-void LidarLoc::SetInitialPose(SE3 init_pose) {
+void LidarLoc::SetInitialPose(SE3 init_pose, bool yaw_search) {
     UL lock(initial_pose_mutex_);
     loc_inited_ = false;
     // map_->ClearMap();
 
     initial_pose_set_ = true;
     initial_pose_ = init_pose;
-    LOG(INFO) << "Set initial pose is: " << initial_pose_.translation().transpose();
+    initial_yaw_search_ = yaw_search;
+    LOG(INFO) << "Set initial pose is: " << initial_pose_.translation().transpose()
+              << (yaw_search ? " (with yaw search)" : "");
 }
 
 void LidarLoc::Align(const CloudPtr& input) {
@@ -490,6 +559,9 @@ void LidarLoc::Align(const CloudPtr& input) {
     // 点云去畸变定到了结束时间，所以该点云的定位也是到结束时间的
     double current_time = math::ToSec(input->header.stamp) + lo::lidar_time_interval;
     current_timestamp_ = current_time;
+    if (first_align_time_ < 0) {
+        first_align_time_ = current_time;
+    }
 
     LOG(INFO) << "current time: " << std::fixed << std::setprecision(12) << current_timestamp_;
 
@@ -528,10 +600,17 @@ void LidarLoc::Align(const CloudPtr& input) {
         SetInitRltState();
 
         if (initial_pose_set_) {
-            /// 尝试在给定点初始化
-            if (InitWithFP(input, initial_pose_)) {
+            /// 尝试在给定点初始化；重定位时给定点可能不在当前已加载的地图块里
+            map_->LoadOnPose(initial_pose_);
+            if (InitWithFP(input, initial_pose_, initial_yaw_search_)) {
                 LOG(INFO) << "init with external pose: " << initial_pose_.translation().transpose();
                 initial_pose_set_ = false;
+                external_reinit_done_ = true;
+                return;
+            }
+            if (initial_yaw_search_) {
+                // 人工重定位：不要退回功能点初始化（会落到地图原点），下一帧继续在给定位姿附近试
+                LOG(WARNING) << "relocalization at given pose not confident yet, retry next scan";
                 return;
             }
         }
@@ -672,6 +751,15 @@ void LidarLoc::Align(const CloudPtr& input) {
     //     }
     // }
 
+    if (debug_bias_on_ && converged_) {
+        const double rel = current_time - first_align_time_;
+        if (rel >= debug_bias_start_ && rel <= debug_bias_end_) {
+            current_pose_esti = SE3(SO3(), debug_bias_) * guess_from_lo;
+            LOG_EVERY_N(WARNING, 20) << "DEBUG: injected NDT bias " << debug_bias_.head<2>().transpose() << " at +"
+                                     << rel << " s";
+        }
+    }
+
     // 用纯激光定位有点太抖了，加一些权重：每次只修正 NDT 相对 LO 预测残差的 balance_factor_（默认 10%）。
     // 定位每 ~2 s 才跑一次（loc_on_kf）时，10° 的初始航向误差要 ~45 s 才降到 1°（2026-09-19 实测 τ≈19 s）。
     // 初始化后的快速收敛阶段：NDT 分值足够高时用 fast_converge_factor_，残差连续达标后恢复平滑。
@@ -706,8 +794,26 @@ void LidarLoc::Align(const CloudPtr& input) {
         LOG(INFO) << "low score " << fitness_score << " < " << options_.track_min_score_ << ", follow LO only";
         balance = 0.0;
     }
-    SE3 esti_balanced = guess_from_lo * SE3::exp(ndt_residual.log() * balance);
-    current_pose_esti = esti_balanced;
+    // 一致性守护：窗口内累积修正超限且 LIO / 腿式里程计不支持时冻结修正并退回（快速收敛阶段不管）
+    SE3 guard_pose;
+    bool guard_rollback = false;
+    if (converged_ && current_lo_pose_set_) {
+        LocGuard::Frame gf;
+        gf.timestamp_ = current_time;
+        gf.lo_ = current_lo_pose_;
+        gf.guess_ = guess_from_lo;
+        gf.ndt_ = current_pose_esti;
+        gf.score_ = fitness_score;
+        gf.has_odom_ = LegOdomAt(current_time, gf.odom_);
+        balance = guard_.Update(gf, balance);
+        guard_rollback = guard_.GetRollback(guard_pose);
+    }
+    current_pose_esti = guess_from_lo * SE3::exp(ndt_residual.log() * balance);
+    if (guard_rollback) {
+        // 输出跳回被拉偏之前；PGO 窗口里还是拉偏的位姿，不重置会把回退平滑成慢慢拖回，按人工重定位同样重置 PGO
+        current_pose_esti = guard_pose;
+        external_reinit_done_ = true;
+    }
 
     // double score_self = 0;
     // if (try_self) {
@@ -794,6 +900,7 @@ void LidarLoc::Align(const CloudPtr& input) {
         UL lock(result_mutex_);
         localization_result_.timestamp_ = current_timestamp_;
         localization_result_.confidence_ = fitness_score;
+        localization_result_.guard_status_ = guard_.GetStatus();
         if (match_fail_count_ < 100) {
             localization_result_.lidar_loc_valid_ = true;
             localization_result_.status_ = LocalizationStatus::GOOD;

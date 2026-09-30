@@ -10,6 +10,7 @@
 
 #include "common/nav_state.h"
 #include "common/timed_pose.h"
+#include "core/localization/lidar_loc/loc_guard.h"
 #include "core/localization/localization_result.h"
 #include "core/maps/tiled_map.h"
 
@@ -65,6 +66,12 @@ class LidarLoc {
         /// 跟踪阶段 NDT 分值低于该值时不采信本次匹配（只按 LO 递推），0 = 关闭（原行为：任何分值都按 balance 融合）
         double track_min_score_ = 0.0;
 
+        /// 一致性守护（见 loc_guard.h），配置在 yaml 的 loc_guard 段
+        LocGuard::Options guard_;
+        /// 外部设置位姿（/initialpose）初始化时，在给定航向左右各搜索的角度与步长（度）；0 = 不搜，直接匹配
+        double init_yaw_search_deg_ = 15.0;
+        double init_yaw_search_step_deg_ = 3.0;
+
         /// 点云过滤
         // float filter_z_min_ = -1.0;
         float filter_z_max_ = 30.0;
@@ -100,6 +107,9 @@ class LidarLoc {
     /// 处理DR状态
     bool ProcessDR(const NavState& state);
 
+    /// 处理腿式里程计位姿（已换到雷达系、Thor 时钟），只用于一致性守护，不参与 DR / PGO
+    void ProcessLegOdom(double timestamp, const SE3& pose);
+
     /// 获取位姿
     NavState GetState();
 
@@ -114,8 +124,8 @@ class LidarLoc {
      */
     bool TryOtherSolution(CloudPtr input, SE3& pose);
 
-    /// 使用功能点初始化
-    bool InitWithFP(CloudPtr input, const SE3& fp_pose);
+    /// 使用功能点初始化；yaw_search 时在给定航向附近做窄范围航向搜索
+    bool InitWithFP(CloudPtr input, const SE3& fp_pose, bool yaw_search = false);
 
     /// 更新全局地图
     bool UpdateGlobalMap();
@@ -140,8 +150,20 @@ class LidarLoc {
     /// 设置UI
     void SetUI(std::shared_ptr<ui::PangolinWindow> ui) { ui_ = ui; }
 
-    /// 设置init pose
-    void SetInitialPose(SE3 init_pose);
+    /// 设置init pose；yaw_search = true 表示来自人工重定位（/initialpose），初始化时在给定航向附近搜索
+    void SetInitialPose(SE3 init_pose, bool yaw_search = false);
+
+    /// 仅离线测试用：[t_start, t_end]（相对第一帧，秒）内把跟踪阶段的 NDT 结果替换为
+    /// "LIO 预测 + map 系平移 (bx, by)"，模拟 NDT 落在错误局部最优、始终往一个方向拉（2026-09-29 走廊现象）
+    void SetDebugNdtBias(double bx, double by, double t_start, double t_end) {
+        debug_bias_ = Vec3d(bx, by, 0);
+        debug_bias_start_ = t_start;
+        debug_bias_end_ = t_end;
+        debug_bias_on_ = true;
+    }
+
+    /// 外部位姿初始化成功后返回一次 true（上层据此重置 PGO，否则 PGO 窗口里的旧位姿会把跳变平滑掉）
+    bool ConsumeExternalReinit() { return external_reinit_done_.exchange(false); }
 
     /// 获取定位结果
     LocalizationResult GetLocalizationResult() {
@@ -204,9 +226,13 @@ class LidarLoc {
     void UpdateMapThread();
 
     /**
-     * 使用网格搜索best yaw
+     * 在 pose 的航向左右各 range_deg 内、每 step_deg 做一次粗匹配，取最高分再精匹配
      */
-    bool YawSearch(SE3& pose, double& confidence, CloudPtr input, CloudPtr output);
+    bool YawSearch(SE3& pose, double& confidence, CloudPtr input, CloudPtr output, double range_deg,
+                   double step_deg);
+
+    /// 取 timestamp 时刻的腿式里程计位姿（插值），没有数据返回 false
+    bool LegOdomAt(double timestamp, SE3& pose);
 
     bool CheckLidarOdomValid(const SE3& current_pose_esti, double& delta_posi);
 
@@ -229,6 +255,13 @@ class LidarLoc {
     std::mutex initial_pose_mutex_;  // 初始定位锁
     bool initial_pose_set_ = false;  // 定位是否被手动设置
     SE3 initial_pose_;               // 手动设置的初始位姿
+    bool initial_yaw_search_ = false;  // 手动设置的初始位姿是否做航向搜索
+    std::atomic_bool external_reinit_done_{false};
+
+    bool debug_bias_on_ = false;  // 见 SetDebugNdtBias
+    Vec3d debug_bias_ = Vec3d::Zero();
+    double debug_bias_start_ = 0, debug_bias_end_ = 0;
+    double first_align_time_ = -1;
     bool loc_inited_ = false;        // 定位是否初始化成功
 
     std::atomic_bool converged_{false};  // 初始化后快速收敛阶段是否结束（LIO 线程读取）
@@ -287,6 +320,11 @@ class LidarLoc {
 
     std::mutex dr_pose_mutex_;
     std::deque<NavState> dr_pose_queue_;
+
+    // 腿式里程计（一致性守护用）
+    std::mutex leg_odom_mutex_;
+    std::deque<TimedPose> leg_odom_queue_;
+    LocGuard guard_;
 
     /// 功能点初始化的记录
     std::vector<SE3> fp_init_fail_pose_vec_;

@@ -61,4 +61,11 @@ add_subdirectory(thirdparty/livox_ros_driver)
 
 add_subdirectory(src)
 
+if (BUILD_TESTING)
+    find_package(ament_cmake_gtest REQUIRED)
+    # 一致性守护是纯逻辑，单独编译，不链接整个 lightning 库
+    ament_add_gtest(test_loc_guard test/test_loc_guard.cc src/core/localization/lidar_loc/loc_guard.cc)
+    target_link_libraries(test_loc_guard glog gflags)
+endif ()
+
 ament_package()

@@ -21,16 +21,21 @@
 
 ### 第一章 状态管理
 
-#### 1.1 重定位 ⚠（机器人端暂未实现）
+#### 1.1 重定位 ⚠（暂未实现，前端不要依赖）
 
 说明：把机器人在地图中的位置设为指定位姿（通常是建图起点 / 充电点）。
 
-⚠ 当前代码里**没有节点处理重定位**：
+现状：
 - `/start_init_pose`：没有任何节点订阅。
-- `/aid_init_pose`（`geometry_msgs/msg/PoseStamped`）：`robot_status_manager` 订阅后转发成 `/initialpose`，
-  但 Lightning 定位**不订阅** `/initialpose`，所以不会生效。
+- `/aid_init_pose`（`geometry_msgs/msg/PoseStamped`）：`robot_status_manager` 订阅后转发成 `/initialpose`。
+- `/initialpose`：2026-09-29 在 Lightning 定位里写了一版订阅（部署在 Thor 上，代码尚未提交），
+  **从未实际使用和验证过，效果未知**。验证之前按"未实现"对待。
 
-前端（原海尔前端的 relocation 页面、新网页控制台）发的是下面两条消息，等机器人端实现后即可生效：
+**目前可用的办法**：把机器人放回**建图起点、朝向和建图时一致**，然后调用 `/mode_set {"action": "localization"}`
+重启定位（第四章 4.3）。定位启动时假设机器人就在地图原点，朝向偏太多会初始化到错误位置，
+启动后用 1.5 `/lightning/loc_status` 和 1.2 `/base_link_pose` 确认。
+
+前端（原海尔前端的 relocation 页面、新网页控制台）发的是下面两条消息，保留格式供以后实现：
 
 **Topic**: `/initialpose`　**Message Type**: `geometry_msgs/msg/PoseWithCovarianceStamped`
 
@@ -143,6 +148,55 @@
 `msg.data` 格式为 `"<slam状态>+<控制模式>"`，例如 `"localization+patrol"`：
 - slam 状态：`idle`（空闲）、`mapping`（建图中）、`localization`（定位中，Nav2 同时在运行）
 - 控制模式：`idle`、`patrol`（导航/巡逻）、`remote_control`（遥控）
+- 两部分的具体含义、怎么切换见**第四章**。⚠ `/mode_set` 切换过程中本话题会暂停发布，返回后恢复。
+
+#### 1.5 定位状态（新增，2026-09-29）
+
+说明：每做一次激光定位（机器人走动时约每秒 1~3 次，静止时约每 2 秒一次）发布一条 JSON，
+用来判断定位是否可信。由 Lightning 定位（`run_loc_online`）发布，只有定位模式下才有。
+⚠ 这是 2026-09-29 部署到 Thor 的版本才有的话题（代码尚未提交），已在实机上确认在发布。
+
+**Topic**: `/lightning/loc_status`　**Message Type**: `std_msgs/msg/String`（`data` 是 JSON 字符串）
+
+````
+{"op": "subscribe", "topic": "/lightning/loc_status", "type": "std_msgs/msg/String"}
+````
+
+`msg.data` 示例：
+
+````
+{"stamp": 1790674490.600, "state": "GOOD", "drift_m": 0.010, "drift_deg": 0.55, "odom_online": true,
+ "odom_agree": 1, "ndt_residual_m": 0.021, "ndt_residual_deg": 0.30, "score": 2.24, "need_reloc": false,
+ "loc_valid": true}
+````
+
+| 字段 | 含义 |
+|---|---|
+| `stamp` | 这次定位对应的激光时间（秒） |
+| `state` | `GOOD` 正常；`NDT_SUSPECT` 地图匹配在把位姿往 LIO 和腿式里程计都不支持的方向拉（可能正在漂）；`LIO_SUSPECT` 腿式里程计认为激光里程计在漂 |
+| `drift_m` / `drift_deg` | 最近 20 s（或走过 5 m）内地图匹配累计修正了多少，超过 0.30 m / 5° 就不再是 `GOOD` |
+| `odom_online` | 是否收到腿式里程计 `/odom`（它和 Nav2 一起启动；`localization+idle` 等 Nav2 停掉的状态下为 `false`，见第四章） |
+| `odom_agree` | 腿式里程计与激光里程计是否一致：`1` 一致，`0` 不一致，`-1` 没有里程计 |
+| `ndt_residual_m` / `ndt_residual_deg` | 这一帧地图匹配结果与预测的差 |
+| `score` | 地图匹配分数（正常约 2.0~2.5）。⚠ 分数高**不代表**位置对：2026-09-29 定位偏了 2 m 时分数仍有 1.96 |
+| `need_reloc` | `NDT_SUSPECT` 持续较久（约 30 次定位）仍未恢复，定位很可能已经偏了（处理办法见 1.1 的"目前可用的办法"） |
+| `loc_valid` | `false` 表示定位正在初始化，此时位置不可信 |
+
+⚠ 目前是**只告警**模式：`state` 变成非 `GOOD` 时定位行为不变，只是报告。建议前端在 `state` 持续非 `GOOD`
+（例如 10 s 以上）、`need_reloc` 为 `true` 或 `loc_valid` 为 `false` 时提示用户，导航前也可以据此拦一下。
+
+#### 1.6 机器人 IP 地址
+
+**Service**: `/get_ip_addresses`　**Service Type**: `aid_robot_msgs/srv/GetString`（`robot_status_manager`）
+
+````
+{"op": "call_service", "service": "/get_ip_addresses", "args": {}}
+````
+
+响应：`{"success": true, "message": "Success", "result": "192.168.x.x"}`；失败时 `success: false`、
+`message: "Failed to get IP address"`。
+
+⚠ 只读取 **`wlan0`** 网卡的地址；Thor 走有线网、没有 `wlan0` 时一律失败。
 
 ---
 
@@ -267,9 +321,11 @@ const points = JSON.parse(res.message).map(row => ({ id: row.id, ...JSON.parse(r
 
 #### 2.2 地图管理
 
+编号沿用旧文档，中间空缺的编号（2.2.6~2.2.8、3.2.2~3.2.3）是已删除的无效接口。
+
 ##### 2.2.1 开始建图
 
-说明：切换到建图模式（`robot_status_manager` 停掉定位/导航，启动 Lightning 建图）。
+说明：切换到建图模式（`robot_status_manager` 停掉定位/导航，启动 Lightning 建图）。切换细节、耗时和注意事项见**第四章 4.3**，完整建图流程见 **4.6**。
 
 ````
 {"op": "call_service", "service": "/mode_set", "args": {"action": "mapping"}}
@@ -285,7 +341,7 @@ const points = JSON.parse(res.message).map(row => ({ id: row.id, ...JSON.parse(r
 
 ##### 2.2.2 取消建图
 
-说明：切换到空闲模式，停止建图，**不保存**。
+说明：切换到空闲模式，停止建图，**不保存**。细节见第四章 4.3 的 `idle`。
 
 ````
 {"op": "call_service", "service": "/mode_set", "args": {"action": "idle"}}
@@ -639,24 +695,158 @@ G1 上没有节点订阅这个话题，发了不会有任何反应。请用 3.1.
 
 ### 第四章 模式设置
 
-**Service**: `/mode_set`　**Service Type**: `aid_robot_msgs/srv/StatusChange`（`robot_status_manager`）
+模式切换由 `robot_bringup/robot_status_manager` 负责：它通过 `launch_manager` 启停建图、定位、Nav2 这几组进程。
+下面的行为都按 `robot_status_manager.cpp` 源码整理。
+
+#### 4.1 两个状态：进程状态 + 控制模式
+
+机器人的状态由两部分组成，`/robot_status`（1.4）发布为 `"<进程状态>+<控制模式>"`，例如 `"localization+patrol"`。
+
+**进程状态**（决定哪些程序在跑）：
+
+| 进程状态 | 在运行的程序 | 有 `/base_link_pose` | 能导航 |
+|---|---|---|---|
+| `idle` | 都不跑（只有传感器、rosbridge、地图管理等常驻节点） | ❌ | ❌ |
+| `mapping` | Lightning 建图（发布 `/map` 供 2.2.4 预览） | ✅（建图坐标系） | ❌ |
+| `localization` | Lightning 定位；**通常** Nav2 也在跑（见下方 `idle` 的例外） | ✅ | 需再切 `patrol` |
+
+**控制模式**（只是一个状态标签，本身不启停程序，除了 `patrol` 会确保 Nav2 可用）：
+
+| 控制模式 | 含义 |
+|---|---|
+| `idle` | 空闲 |
+| `patrol` | 导航 / 巡逻模式，Nav2 已确认激活，可以发 3.1 / 3.2 的导航任务 |
+| `remote_control` | 遥控模式（前端据此显示遥控界面；机器人端不做任何切换） |
+
+#### 4.2 调用方式
+
+**Service**: `/mode_set`　**Service Type**: `aid_robot_msgs/srv/StatusChange`
+
+````
+- 入参：string action   取值 mapping / localization / patrol / remote_control / idle
+- 返回：string message  成功 "ok"，失败 "err"（没有 success 字段，也没有失败原因，原因只在机器人日志里）
+````
 
 ````
 {"op": "call_service", "service": "/mode_set", "args": {"action": "localization"}}
 ````
 
-响应：`{"values": {"message": "ok"}, "result": true}`，失败为 `"err"`。
+响应：`{"op": "service_response", "service": "/mode_set", "values": {"message": "ok"}, "result": true}`
 
-| action | 作用 |
-|---|---|
-| `mapping` | 停止定位/导航，启动 Lightning 建图 |
-| `localization` | 按数据库"当前地图"启动定位 + Nav2 |
-| `patrol` | 控制模式切到导航/巡逻；⚠ 必须已经在定位模式，否则返回 `err` |
-| `remote_control` | 控制模式切到遥控 |
-| `idle` | 停止建图（不保存）/ 回到空闲 |
+⚠ **这个服务是阻塞的，要等切换完成才返回**：
+- 耗时从不到 1 秒（`remote_control`）到**十几秒至一分钟以上**（`mapping` / `localization` / `patrol`），各项见 4.3。
+  每停一组进程通常要 5~13 s，最长等 45 s；`patrol` 最多等 Nav2 激活 60 s。
+- 机器人上的 rosbridge 不设服务超时，前端**不要自己设太短的超时**，也不要在返回前重复调用
+  （重复调用会排队，等前一个做完再执行，状态会被反复切换）。
+- 切换期间 `robot_status_manager` 忙于处理请求，**`/robot_status` 会暂停发布**，返回后恢复。
+- 前端建议：点击后显示"切换中…"并禁用模式按钮，收到响应后再以 `/robot_status` 为准刷新界面。
+- 返回 `"err"` 时，进程可能已经停了一半（例如定位已停、新进程没起来），以 `/robot_status` 的实际值为准。
 
-⚠ `robot.launch.py` 用 `start_backend:=false` 启动时，进程由顶层 launch 管理，`/mode_set` 不能切换建图/定位，
-只能切换 `patrol` / `remote_control`。切换结果可以订阅 1.4 `/robot_status` 确认。
+#### 4.3 每个 action 做了什么
+
+**`mapping`：开始建图**
+
+- 前置条件：无（任何状态都可以切）。
+- 执行：停 Nav2 → 停定位（如果正在定位）→ 启动 Lightning 建图。
+- 结果：`/robot_status` 变成 `mapping+<原控制模式>`（⚠ 控制模式不会被改，例如原来是 `patrol` 就会显示 `mapping+patrol`）。
+- 耗时：约 15~30 s。
+- ⚠ **已经在建图时再调 `mapping`，会重启建图，之前没保存的建图全部丢弃。**
+- ⚠ **地图原点 = 建图进程启动那一刻机器人（雷达）的位置和朝向**，不是地上标记的点。切换过程中 G1 常会原地挪几步，
+  所以之后把机器人放回"原点"启动定位时，`/base_link_pose` 差个二三十厘米、一两度是正常的。
+  想让原点可复现：先把机器人摆好，等 `/robot_status` 变成 `mapping+...` 之后再开始走。
+- 保存：见 2.2.3（`/aid_save_map` → `/add_map`），保存后进程状态回到 `idle`，**不会自动开始定位**，见 4.6。
+
+**`localization`：启动 / 重启定位（+ Nav2）**
+
+- 前置条件：数据库"当前地图"（2.2.5 / 2.2.14）必须是完整的 Lightning 地图（目录里有 `index.txt` 和 `map.yaml`）；
+  没有的话退回启动参数 `default_map_dir`，也没有则返回 `err`。
+- 执行：停建图（**未保存的建图丢弃**）或停掉正在运行的定位 → 停 Nav2 → 读当前地图 → 启动 Lightning 定位 → 启动 Nav2。
+- 结果：`localization+<原控制模式>`。
+- 耗时：约 20~40 s。之后 Nav2 自己还要 5~15 s 才能激活（不影响本服务返回）。
+- 用途：
+  - 切换地图后让新地图生效（2.2.5 的第二步）。
+  - 建完图保存后开始使用新地图。
+  - 重启定位：定位启动时**假设机器人就在地图原点、朝向和建图起点一致**。机器人不在那里时定位可能初始化到错误位置，
+    而重定位（1.1）目前不可用，所以重启前要先把机器人放回建图起点。
+- ⚠ 已经在定位时再调 `localization` 会重启定位，重启期间没有 `/base_link_pose`。
+
+**`patrol`：进入导航模式**
+
+- 前置条件：进程状态必须是 `localization`，否则直接返回 `err`（日志 `can not set to patrol model`）。
+- 执行：Nav2 没在跑就先启动 → 等 Nav2 激活（最多 60 s；Nav2 要等定位发出位姿才能激活）→ 让 map_server 重新加载当前地图的 `map.yaml`。
+- 结果：`localization+patrol`。
+- 耗时：Nav2 已激活时几秒；刚启动定位后马上切，可能要等几十秒。
+- 发导航任务（3.1 / 3.2）之前先切到 `patrol`，网页控制台就是这么做的。
+- 失败常见原因：定位没有输出位姿（日志 `Nav2 is not active (check localization TF map->base_link)`）。
+
+**`remote_control`：遥控模式**
+
+- 前置条件：无。
+- 执行：**只把控制模式改成 `remote_control`**，不启停任何程序。
+- 结果：`<原进程状态>+remote_control`，立即返回。
+- ⚠ 不会停止正在执行的导航任务，也不会停 Nav2。切遥控前如果有任务在跑，先调 `/patrol_control` 取消（3.1.4），
+  否则 Nav2 和遥控会同时发速度。
+
+**`idle`：回到空闲**
+
+- 前置条件：无。
+- 执行：停 Nav2；如果正在建图就停建图（**不保存**）；控制模式改成 `idle`。
+- ⚠ **在定位模式下调 `idle` 不会停定位**：结果是 `localization+idle`，`/base_link_pose` 继续有，只是 Nav2 停了。
+  这时再调 `patrol` 会重新启动 Nav2。
+- 结果：建图中调用 → `idle+idle`；定位中调用 → `localization+idle`。
+- 耗时：约 5~15 s（停 Nav2）。
+
+**其它字符串**：返回 `err`，什么也不做。
+
+#### 4.4 状态切换速查
+
+| 当前 `/robot_status` | 调用 | 结果 | 说明 |
+|---|---|---|---|
+| `idle+idle`（开机时没有可用地图） | `mapping` | `mapping+idle` | 第一次建图 |
+| `idle+idle` | `localization` | `localization+idle` | 需要数据库里有当前地图 |
+| `idle+idle` | `patrol` | ❌ `err` | 先 `localization` |
+| `mapping+*` | 保存（2.2.3） | `idle+*` | 保存后不自动定位 |
+| `mapping+*` | `idle` | `idle+idle` | 放弃本次建图 |
+| `mapping+*` | `localization` | `localization+*` | 放弃本次建图，用当前地图定位 |
+| `mapping+*` | `mapping` | `mapping+*` | ⚠ 重启建图，丢弃未保存内容 |
+| `localization+*` | `patrol` | `localization+patrol` | 可以导航了 |
+| `localization+*` | `idle` | `localization+idle` | ⚠ 只停 Nav2，定位还在 |
+| `localization+*` | `localization` | `localization+*` | 重启定位（换地图后用） |
+| `localization+*` | `mapping` | `mapping+*` | 停定位和 Nav2，开始建图 |
+| 任意 | `remote_control` | `<不变>+remote_control` | 只改标签 |
+
+#### 4.5 开机时的默认状态
+
+`robot.launch.py` 默认 `mode:=navigation`、`start_backend:=true`，开机后 `robot_status_manager` 自动：
+- 数据库里有可用的当前地图（或 `default_map_dir` 可用）→ 启动定位 + Nav2 → `localization+idle`。
+  ⚠ 开机定位同样假设机器人在地图原点、朝向和建图起点一致（见 4.3 `localization`）。
+- 没有可用地图 → 保持 `idle+idle`，需要先建图。
+- 启动 `mode:=localization` 和 `navigation` 一样（定位 + Nav2）；`mode:=mapping` → 开机直接建图；`mode:=base` → 什么都不启动，等 `/mode_set`。
+
+`robot.launch.py start_backend:=false` 时进程由顶层 launch 直接管理，`/mode_set` **不能**切换建图 / 定位：
+- `remote_control`、以及定位时的 `patrol`（要求 Nav2 已激活）可以用；
+- 请求的模式和当前进程状态相同时返回 `ok`，其它一律 `err`（日志 `Cannot switch process mode ... owned by robot.launch.py`），
+  要换模式只能用新的 `mode:=` 重启整套 launch。
+
+#### 4.6 典型流程
+
+**新建一张地图并投入使用**
+
+1. `/mode_set {"action": "mapping"}` → 等响应 `ok`，`/robot_status` 变成 `mapping+...`（机器人不要动，见 4.3）。
+2. 订阅 2.2.4 `/map_base64` 看预览，遥控机器人把区域走一遍，最后回到起点附近（形成回环）。
+3. `/aid_save_map {"map_file_name": "/maps/<名字>"}` → 进程状态回到 `idle`。
+4. `/add_map {"map_name": "...", "map_file": "/maps/<名字>"}` → 写入数据库。
+5. `/get_map_list` 找到新地图的 id → `/set_current_map_id {"id": <id>}`。
+6. 把机器人放回建图起点、朝向一致 → `/mode_set {"action": "localization"}`。
+7. 检查 `/base_link_pose` 在原点附近（差二三十厘米正常，见 4.3 `mapping`）、`/lightning/loc_status` 为 `GOOD`；
+   明显不对就重新摆放机器人后再调一次 `localization`。
+8. 在新地图上重新标注点位（2.1）。⚠ 每张图坐标系不同，旧地图的点位不能直接用。
+
+**切换到另一张已有地图**：先把机器人放到新地图的建图起点 → `/set_current_map_id` → `/mode_set localization`。
+
+**导航**：确认 `localization+...` 且定位正常 → `/mode_set patrol` → 3.1 单点导航或 3.2 巡逻 → 结束或取消用 `/patrol_control`。
+
+**放弃正在进行的建图**：`/mode_set idle`（或直接 `localization` 回到原来的地图）。
 
 ---
 
@@ -752,7 +942,7 @@ ros2 launch semantic_map_ros semantic_map.launch.py                       # Thor
 | `score_threshold` | 0.52 | 低于它算"没找到" |
 | `top_k` | 3 | 返回的候选数 |
 | `text_in_topic` | /semantic_map/text_in | 话题输入（5.5），填 "" 关闭 |
-| `text_in_action` | search | 话题输入收到后：search 只搜索；go 找到就导航（launch 参数 `text_in_action:=go`） |
+| `text_in_action` | go | 话题输入收到后：go 找到就导航；search 只搜索（launch 参数 `text_in_action:=search`） |
 | `log_file` | ~/maps/semantic_map_log.jsonl | 调试记录文件（5.6），填 "" 不写；超过 20 MB 滚动成 `.1` |
 | `history_size` | 200 | `/semantic_map/history` 返回的最近条数 |
 
@@ -781,7 +971,7 @@ ROS2 节点里直接调：`ros2 service call /semantic_map/search aid_robot_msgs
 ````
 
 - `data` 同样可以是 `{"text": "...", "source": "asr"}`；不带 source 时来源记为 `topic`。
-- 默认只搜索不导航（`text_in_action: search`），结果看 5.6 的调试记录；要让它找到就走，启动时加 `text_in_action:=go`。
+- 默认找到就导航（`text_in_action: go`，2026-09-30 起）；只想搜索不走，启动时加 `text_in_action:=search`，结果看 5.6 的调试记录。
 - 走导航时和 5.2 一样，需要机器人已经在定位 + 导航模式（`/mode_set patrol`），这个由调用方或网页负责。
 - 话题没有应答；出错（例如发来空内容、没有选地图）只会记在调试记录里。
 
@@ -855,3 +1045,7 @@ ROS2 节点里直接调：`ros2 service call /semantic_map/search aid_robot_msgs
 | 3.2.1 | — | 补充：无限循环、朝向自动计算、失败点跳过 |
 | 5 | 无 | 新增语义地图接口 |
 | 5.5 / 5.6 | 无 | 新增话题输入 `/semantic_map/text_in`、请求来源 `source`、调试记录（`/semantic_map/debug`、`/semantic_map/history`、日志文件） |
+| 1.1 重定位 | 标注"暂未实现" | 仍按未实现对待（Thor 上有一版未提交、未验证的 `/initialpose` 订阅）；补充目前可用的办法：放回建图起点后重启定位 |
+| 1.5 | 无 | 新增 `/lightning/loc_status` 定位状态（一致性守护，只告警；2026-09-29 部署版本，代码未提交） |
+| 1.6 | 无 | 补充 `/get_ip_addresses`（只取 wlan0） |
+| 4 模式设置 | 只有一张 action 表 | 按源码补全：两个状态维度、每个 action 的执行步骤 / 前置条件 / 耗时、阻塞调用、`idle` 在定位时不停定位、`remote_control` 只改标签、开机默认状态、典型流程 |

@@ -52,6 +52,13 @@ class BaseTFPublisher {
 
     const std::string& LidarFrame() const { return lidar_frame_; }
 
+    /// Publish 的逆：map 系下 base_link 平面位姿 (x, y, yaw) -> 雷达位姿猜测（忽略躯干倾斜，供重定位初值）。
+    /// 高度取最近一次发布时的躯干高度；还没发布过则假定雷达在 map z=0（建图起点高度）。外参未就绪返回 false。
+    bool BasePoseToLidar(double x, double y, double yaw, SE3& map_to_lidar);
+
+    /// 雷达相对 base 的平面安装偏移（xy + 航向），用于把平面里程计位姿换到雷达系。外参未就绪返回 false。
+    bool PlanarBaseToLidar(SE3& base_to_lidar);
+
    private:
     void CacheStaticExtrinsic(const tf2_msgs::msg::TFMessage& msg);
 
@@ -66,6 +73,8 @@ class BaseTFPublisher {
     bool extrinsic_ready_ = false;
     bool planar_base_ = false;
     SE3 lidar_to_parent_;  // T_lidar_parent，parent 为 body_link（平面模式）或 base_link
+    bool parent_z_valid_ = false;
+    double last_parent_z_ = 0.0;  // 最近一次发布时 parent 在 map（点云地图）系的高度
 
     std::string base_frame_ = "base_link";
     std::string lidar_frame_ = "mid360_link";

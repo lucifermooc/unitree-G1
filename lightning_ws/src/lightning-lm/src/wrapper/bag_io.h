@@ -118,6 +118,17 @@ class RosbagIO {
     //     });
     // }
 
+    /// ROS nav_msgs/Odometry 原样交给回调（离线回放腿式里程计 /odom 用）
+    using RosOdomHandle = std::function<bool(nav_msgs::msg::Odometry::SharedPtr)>;
+    RosbagIO &AddRosOdomHandle(const std::string &topic_name, RosOdomHandle f) {
+        return AddHandle(topic_name, [f, this](const MsgType &m) -> bool {
+            auto msg = std::make_shared<nav_msgs::msg::Odometry>();
+            rclcpp::SerializedMessage data(*m->serialized_data);
+            seri_odom_.deserialize_message(&data, msg.get());
+            return f(msg);
+        });
+    }
+
     /// 清除现有的处理函数
     void CleanProcessFunc() { process_func_.clear(); }
 

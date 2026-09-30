@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  G1 外挂计算机（Thor）的 CycloneDDS 配置。robot.launch.py 通过 dds_config 参数把本文件设成
-  CYCLONEDDS_URI，覆盖 /home/unitree/unitree_ros2/setup.sh 里的默认值（默认值只绑定网卡、不限制组播）。
+  G1 外挂计算机（Thor）的 CycloneDDS 配置。system/dds_env.sh 把本文件设成 CYCLONEDDS_URI
+  （开机自启 script/g1_autostart.sh 会 source 它），覆盖 /home/unitree/unitree_ros2/setup.sh 里的默认值（默认值只绑定网卡、不限制组播）。
+  robot.launch.py 自己不设置 DDS。
   手动开 rviz2 / ros2 CLI 的终端请先 `source <share>/robot_bringup/system/dds_env.sh`。
 
   与原默认值唯一的行为差别：
