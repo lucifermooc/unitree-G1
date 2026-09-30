@@ -113,6 +113,11 @@ void BaseTFPublisher::Publish(const SE3& map_to_lidar, const std_msgs::msg::Head
     }
     // planar_base_ 时 extrinsic 为 T_lidar_body，否则为 T_lidar_base。
     const SE3 map_to_parent = map_to_lidar * extrinsic;
+    {
+        std::lock_guard<std::mutex> lock(extrinsic_mutex_);
+        last_parent_z_ = map_to_parent.translation().z();
+        parent_z_valid_ = true;
+    }
     auto fill = [](geometry_msgs::msg::TransformStamped& msg, const SE3& T, double dz) {
         msg.transform.translation.x = T.translation().x();
         msg.transform.translation.y = T.translation().y();
@@ -145,6 +150,25 @@ void BaseTFPublisher::Publish(const SE3& map_to_lidar, const std_msgs::msg::Head
     tilt.child_frame_id = body_frame_;
     fill(tilt, base_to_body, 0.0);
     tf_broadcaster_->sendTransform(std::vector<geometry_msgs::msg::TransformStamped>{output, tilt});
+}
+
+bool BaseTFPublisher::BasePoseToLidar(double x, double y, double yaw, SE3& map_to_lidar) {
+    std::lock_guard<std::mutex> lock(extrinsic_mutex_);
+    if (!extrinsic_ready_) return false;
+    const SE3 parent_to_lidar = lidar_to_parent_.inverse();
+    const double z = parent_z_valid_ ? last_parent_z_ : -parent_to_lidar.translation().z();
+    map_to_lidar = SE3(SO3::rotZ(yaw), Vec3d(x, y, z)) * parent_to_lidar;
+    return true;
+}
+
+bool BaseTFPublisher::PlanarBaseToLidar(SE3& base_to_lidar) {
+    std::lock_guard<std::mutex> lock(extrinsic_mutex_);
+    if (!extrinsic_ready_) return false;
+    const SE3 parent_to_lidar = lidar_to_parent_.inverse();
+    const Mat3d R = parent_to_lidar.rotationMatrix();
+    const Vec3d t = parent_to_lidar.translation();
+    base_to_lidar = SE3(SO3::rotZ(std::atan2(R(1, 0), R(0, 0))), Vec3d(t.x(), t.y(), 0.0));
+    return true;
 }
 
 }  // namespace lightning

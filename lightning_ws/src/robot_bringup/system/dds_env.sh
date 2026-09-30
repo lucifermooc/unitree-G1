@@ -1,5 +1,5 @@
 # 手动开 rviz2 / ros2 CLI / 录包的终端里 source 本文件，让它们与整套栈用同一份 DDS 配置。
-# robot.launch.py 启动的节点已自动使用（dds_config 参数），不需要再 source。
+# robot.launch.py 本身不设置 DDS，全看启动它的 shell；开机自启入口 script/g1_autostart.sh 已 source 本文件。
 # 用法: source /opt/G1/lighting_ws/install/robot_bringup/share/robot_bringup/system/dds_env.sh
 _dds_self=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source /home/unitree/unitree_ros2/setup.sh >/dev/null   # 官方环境：RMW + 本体网段

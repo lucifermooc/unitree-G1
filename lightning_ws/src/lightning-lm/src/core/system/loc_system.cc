@@ -3,6 +3,11 @@
 //
 
 #include "core/system/loc_system.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+
 #include "core/localization/localization.h"
 #include "io/yaml_io.h"
 #include "wrapper/ros_utils.h"
@@ -78,6 +83,20 @@ bool LocSystem::Init(const std::string &yaml_path) {
         LOG(INFO) << "publishing deskewed scan on /lightning/registered_scan (frame=" << lidar_frame_ << ")";
     }
 
+    // 一致性守护：腿式里程计输入 + 状态输出；人工重定位
+    std::string odom_topic = "/odom";  // 老配置没有该键：订阅 /odom，收不到时守护只用 LIO
+    yaml.GetOptional("loc_guard", "odom_topic", odom_topic);
+    if (!odom_topic.empty()) {
+        odom_sub_ = node_->create_subscription<nav_msgs::msg::Odometry>(
+            odom_topic, rclcpp::QoS(50), [this](nav_msgs::msg::Odometry::SharedPtr msg) { ProcessOdom(msg); });
+        LOG(INFO) << "loc guard leg odometry: " << odom_topic;
+    }
+    loc_status_pub_ = node_->create_publisher<std_msgs::msg::String>("/lightning/loc_status", rclcpp::QoS(10));
+    loc_->SetLidarLocResultCallback([this](const loc::LocalizationResult &res) { PublishLocStatus(res); });
+    init_pose_sub_ = node_->create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
+        "/initialpose", rclcpp::QoS(10),
+        [this](geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg) { ProcessInitialPose(msg); });
+
     bool ret = loc_->Init(yaml_path, map_path);
     if (ret) {
         LOG(INFO) << "online loc node has been created.";
@@ -94,6 +113,91 @@ void LocSystem::PublishBaseTF(const geometry_msgs::msg::TransformStamped &lidar_
     const Vec3d translation(t.x, t.y, t.z);
     if (!q.coeffs().allFinite() || q.norm() < 1e-6 || !translation.allFinite()) return;
     base_tf_->Publish(SE3(q.normalized(), translation), lidar_pose.header, map_z_offset_);
+}
+
+void LocSystem::ProcessOdom(const nav_msgs::msg::Odometry::SharedPtr &msg) {
+    if (!loc_started_ || base_tf_ == nullptr) return;
+    const double now = node_->now().seconds();
+    const double stamp = rclcpp::Time(msg->header.stamp).seconds();
+
+    // /odom 的时间戳是 G1 本体时钟，不一定与本机（雷达时间戳）对齐：先用前 50 条估计时钟差
+    if (!odom_offset_ready_) {
+        odom_offset_samples_.push_back(now - stamp);
+        if (odom_offset_samples_.size() < 50) return;
+        std::nth_element(odom_offset_samples_.begin(), odom_offset_samples_.begin() + 25,
+                         odom_offset_samples_.end());
+        odom_offset_ = odom_offset_samples_[25];
+        odom_offset_samples_.clear();
+        odom_offset_ready_ = true;
+        if (std::fabs(odom_offset_) > 0.05) {
+            LOG(WARNING) << "leg odometry clock offset " << odom_offset_ << " s (robot clock vs this host), compensated";
+        } else {
+            LOG(INFO) << "leg odometry clock offset " << odom_offset_ << " s";
+        }
+    }
+    const double t = stamp + odom_offset_;
+    if (std::fabs(now - t) > 1.0) {
+        // 本体重启 / 时钟跳变：重新估计
+        LOG(WARNING) << "leg odometry clock jumped (" << now - t << " s), re-estimating offset";
+        odom_offset_ready_ = false;
+        last_odom_time_ = -1.0;
+        return;
+    }
+    if (t < last_odom_time_ + 0.02) return;  // 降到 <=50 Hz，守护只需要窗口两端
+
+    SE3 base_to_lidar;
+    if (!base_tf_->PlanarBaseToLidar(base_to_lidar)) return;
+    const auto &p = msg->pose.pose.position;
+    const auto &q = msg->pose.pose.orientation;
+    const double yaw = std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+    if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(yaw)) return;
+    const SE3 odom_to_base(SO3::rotZ(yaw), Vec3d(p.x, p.y, 0.0));
+    loc_->ProcessLegOdom(t, odom_to_base * base_to_lidar);
+    last_odom_time_ = t;
+    last_odom_wall_ = now;
+}
+
+void LocSystem::ProcessInitialPose(const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr &msg) {
+    if (!loc_started_) return;
+    if (!msg->header.frame_id.empty() && msg->header.frame_id != "map") {
+        LOG(WARNING) << "ignore /initialpose in frame " << msg->header.frame_id << " (expect map)";
+        return;
+    }
+    const auto &p = msg->pose.pose.position;
+    const auto &q = msg->pose.pose.orientation;
+    const double yaw = std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+    if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(yaw)) {
+        LOG(WARNING) << "ignore invalid /initialpose";
+        return;
+    }
+    SE3 map_to_lidar;
+    if (base_tf_ == nullptr || !base_tf_->BasePoseToLidar(p.x, p.y, yaw, map_to_lidar)) {
+        LOG(WARNING) << "ignore /initialpose: LiDAR extrinsic not ready";
+        return;
+    }
+    LOG(WARNING) << "relocalize from /initialpose: base " << p.x << ", " << p.y << ", yaw " << yaw * 180.0 / M_PI
+                 << " deg -> lidar " << map_to_lidar.translation().transpose();
+    loc_->SetExternalPose(map_to_lidar.unit_quaternion(), map_to_lidar.translation(), true);
+}
+
+void LocSystem::PublishLocStatus(const loc::LocalizationResult &res) {
+    if (loc_status_pub_ == nullptr) return;
+    const auto &g = res.guard_status_;
+    const double last_odom = last_odom_wall_.load();
+    const bool odom_online = last_odom > 0 && node_->now().seconds() - last_odom < 1.0;
+    char buf[640];
+    std::snprintf(buf, sizeof(buf),
+                  "{\"stamp\": %.3f, \"state\": \"%s\", \"frozen\": %s, \"drift_m\": %.3f, \"drift_deg\": %.2f, "
+                  "\"odom_online\": %s, \"odom_agree\": %d, \"ndt_residual_m\": %.3f, "
+                  "\"ndt_residual_deg\": %.2f, \"score\": %.3f, \"rollbacks\": %d, \"last_rollback_m\": %.3f, "
+                  "\"need_reloc\": %s, \"loc_valid\": %s}",
+                  res.timestamp_, loc::LocGuard::StateName(g.state_), g.frozen_ ? "true" : "false", g.drift_m_,
+                  g.drift_deg_, odom_online ? "true" : "false", g.odom_agree_, g.residual_m_, g.residual_deg_,
+                  res.confidence_, g.rollbacks_, g.last_rollback_m_, g.need_reloc_ ? "true" : "false",
+                  res.lidar_loc_valid_ ? "true" : "false");
+    std_msgs::msg::String msg;
+    msg.data = buf;
+    loc_status_pub_->publish(msg);
 }
 
 void LocSystem::SetInitPose(const SE3 &pose) {

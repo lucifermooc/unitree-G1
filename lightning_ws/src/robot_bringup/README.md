@@ -5,6 +5,43 @@
 不传 `mode` 时默认使用 `navigation`，启动完整定位与导航链路；默认地图目录为
 `/opt/G1/lighting_ws/data/new_map`。
 
+## 开机自启（Thor）
+
+开机后自动启动整套栈和语义地图，不再手动执行 `ros2 launch robot_bringup robot.launch.py`。
+由两个 systemd 服务负责，以 `unitree` 用户身份运行：
+
+| 服务 | 执行 | 等同于手动 |
+|---|---|---|
+| `g1-robot` | `script/g1_autostart.sh robot` | `robot.launch.py`（默认参数，navigation 模式） |
+| `g1-semantic-map` | `script/g1_autostart.sh semantic` | `HF_HUB_OFFLINE=1 semantic_map.launch.py use_fp16:=true model_name:=~/models/bge-m3` |
+
+两个服务启动时都会按顺序加载 `/opt/ros/jazzy`、工作区 `install/setup.bash` 和 `system/dds_env.sh`。其中 `dds_env.sh` 负责
+DDS 设置：spdp 组播只用于发现，数据走单播，参与者上限为 100。启动前服务还会等待以下条件：
+
+- DDS 网卡 `enP2p1s0` 拿到 IP；
+- 语义地图服务等待 Qdrant 的 6333 端口就绪。
+
+如果已经有一套栈在运行（例如手动用 nohup 起的），服务会拒绝启动，避免出现两套同名进程。
+
+```bash
+S=/opt/G1/lighting_ws/src/robot_bringup/script
+$S/g1_service.sh install    # 只需一次（需要 sudo 密码）：安装两个服务并设为开机自启，同时安装 system/60-dds-buffers.conf
+                            # 和 /etc/sudoers.d/g1-autostart（只放行启停这两个服务免密，之后 restart/stop/start 不再要密码）
+$S/g1_service.sh restart    # 部署后重启：停服务并清理所有残留 ROS 进程（等同 stop_all），然后启动服务
+$S/g1_service.sh status     # 查看服务状态和日志位置
+$S/g1_service.sh log        # 跟踪 /opt/G1/logs/robot_latest.log；看语义地图用 log semantic
+$S/g1_service.sh stop       # 停止并清理；下次开机仍会自启
+$S/g1_service.sh uninstall  # 取消开机自启
+```
+
+- 启动参数写在 `script/g1_autostart.env`，改完执行 `restart` 生效。例如 `G1_ROBOT_ARGS="mode:=base"`，或给语义地图追加 `text_in_action:=search`（只搜索不导航）。
+- 只对某台机器生效的设置写在该机器的 `/opt/G1/g1_autostart.local.env`，它不进仓库。比如 D435i 序列号和默认值
+  347622073141 不同时，用 `rs-enumerate-devices -s` 查到序列号后写 `G1_ROBOT_ARGS="realsense_serial_no:='<序列号>'"`；
+  否则相机节点会一直报 NOT found。
+- 日志每次启动生成一份，保存在 `/opt/G1/logs/{robot,semantic}_<时间>.log`，各保留最近 10 份。
+- 服务不会自动重启。手动执行 `stop_all.launch.py` 后，服务不会自己再拉起一套栈；此时仍可以按原方式手动 `robot.launch.py`。
+- 如果不想开机自启语义地图：`sudo systemctl disable g1-semantic-map`。
+
 ## 互斥模式
 
 ```bash

@@ -353,6 +353,11 @@ void LaserMapping::ProjectKFs(CloudPtr cloud, int size_limit) {
     pose_cur = pose_cur.inverse();
 
     for (auto kf : proj_kfs_) {
+        // 当前帧刚成为关键帧时也在 proj_kfs_ 里，且与 scan_undistort_ 共用点云：投影自己等于把最早 1001 点再抄一遍，跳过。
+        // 必须和原始 scan_undistort_ 比（cloud 是 GetProjCloud 的副本，比它永远不相等）。
+        if (kf->GetCloud() == scan_undistort_) {
+            continue;
+        }
         // LOG(INFO) << "projecting kf: " << kf->GetID();
         // if (last_kf_) {
         // auto kf = last_kf_;
@@ -889,7 +894,9 @@ CloudPtr LaserMapping::GetRecentCloud() {
 }
 
 CloudPtr LaserMapping::GetProjCloud() {
-    auto cloud = scan_undistort_;
+    // 在副本上追加（2026-09-30）：scan_undistort_ 同时被当前关键帧持有。原来原地追加，会把投影点永久留在关键帧点云里，
+    // 当前帧就是新关键帧时还会一边遍历自身一边 push_back（扩容后迭代器失效，未定义行为）。
+    CloudPtr cloud(new PointCloudType(*scan_undistort_));
     ProjectKFs(cloud);
     return cloud;
 }

@@ -132,7 +132,7 @@
         → 服务 /semantic_map/search 或 /semantic_map/go，data='{"text":"我想喝水","source":"web"}'
      ② 其他程序调同样的服务，例如 data='{"text":"我想喝水","source":"asr"}'
      ③ ASR 往话题 /semantic_map/text_in（std_msgs/String）发 data="我想喝水"
-        （只管发不等结果；默认只搜索，text_in_action=go 时找到就导航）
+        （只管发不等结果；默认 text_in_action=go 找到就导航，search 时只搜索）
         │
         ▼
 [C1.5] semantic_map_server  _handle()：三个入口都走这里

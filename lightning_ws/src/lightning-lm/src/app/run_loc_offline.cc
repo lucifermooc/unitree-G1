@@ -20,6 +20,10 @@ DEFINE_string(input_bag, "", "输入数据包");
 DEFINE_string(config, "./config/default.yaml", "配置文件");
 DEFINE_string(map_path, "./data/new_map/", "地图路径");
 DEFINE_string(init_pose, "", "初始位姿 \"x y yaw_deg\"（地图系雷达位姿）；缺省按原逻辑从地图功能点初始化");
+DEFINE_string(odom_topic, "", "腿式里程计话题（nav_msgs/Odometry，如 /odom），供一致性守护；空 = 不用");
+DEFINE_double(odom_time_offset, 0.0, "加到里程计时间戳上的秒数（本体时钟与雷达时钟之差）");
+DEFINE_string(odom_lidar_offset, "0 0 0", "雷达相对 base 的平面安装偏移 \"x y yaw_deg\"，把里程计位姿换到雷达系");
+DEFINE_string(inject_ndt_bias, "", "仅测试：\"bx by t_start t_end\"，在该时间段（相对第一帧，秒）让 NDT 始终偏离预测 (bx, by)");
 DEFINE_string(tf_out, "", "逐条记录定位输出（即在线模式交给 TF 发布的 T_map_lidar）：stamp x y z qx qy qz qw");
 
 /// 运行定位的测试
@@ -50,6 +54,14 @@ int main(int argc, char** argv) {
         loc.SetExternalPose(Quatd(Eigen::AngleAxisd(yaw_deg * M_PI / 180.0, Vec3d::UnitZ())), Vec3d(x, y, 0));
     }
 
+    if (!FLAGS_inject_ndt_bias.empty()) {
+        double bx = 0, by = 0, t0 = 0, t1 = 0;
+        std::istringstream(FLAGS_inject_ndt_bias) >> bx >> by >> t0 >> t1;
+        loc.SetDebugNdtBias(bx, by, t0, t1);
+        LOG(WARNING) << "TEST ONLY: NDT bias (" << bx << ", " << by << ") injected during +" << t0 << " ~ +" << t1
+                     << " s";
+    }
+
     std::ofstream tf_out;
     if (!FLAGS_tf_out.empty()) {
         tf_out.open(FLAGS_tf_out);
@@ -65,6 +77,20 @@ int main(int argc, char** argv) {
     lightning::YAML_IO yaml(FLAGS_config);
     std::string lidar_topic = yaml.GetValue<std::string>("common", "lidar_topic");
     std::string imu_topic = yaml.GetValue<std::string>("common", "imu_topic");
+
+    if (!FLAGS_odom_topic.empty()) {
+        double ox = 0, oy = 0, oyaw_deg = 0;
+        std::istringstream(FLAGS_odom_lidar_offset) >> ox >> oy >> oyaw_deg;
+        const SE3 base_to_lidar(SO3::rotZ(oyaw_deg * M_PI / 180.0), Vec3d(ox, oy, 0));
+        rosbag.AddRosOdomHandle(FLAGS_odom_topic, [&loc, base_to_lidar](nav_msgs::msg::Odometry::SharedPtr msg) {
+            const auto& p = msg->pose.pose.position;
+            const auto& q = msg->pose.pose.orientation;
+            const double yaw = std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+            loc.ProcessLegOdom(ToSec(msg->header.stamp) + FLAGS_odom_time_offset,
+                               SE3(SO3::rotZ(yaw), Vec3d(p.x, p.y, 0.0)) * base_to_lidar);
+            return true;
+        });
+    }
 
     rosbag
         .AddImuHandle(imu_topic,

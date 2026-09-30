@@ -18,6 +18,7 @@ data 可以是普通文本，也可以是 {"text": "...", "source": "asr"}（sou
 点位有增删改时，下次搜索会自动重建（按点位内容指纹判断），也可以手动调 rebuild。
 """
 import json
+import os
 import threading
 import time
 from datetime import datetime
@@ -45,6 +46,8 @@ class SemanticMapServer(Node):
         p = self.declare_parameter
         self.qdrant_host = p("qdrant_host", "localhost").value
         self.qdrant_port = p("qdrant_port", 6333).value
+        # 非空时用本地文件存向量（qdrant-client 本地模式，不需要 Qdrant 服务/Docker），如 ~/maps/semantic_qdrant
+        self.qdrant_path = os.path.expanduser(p("qdrant_path", "").value)
         self.threshold = p("score_threshold", 0.52).value
         self.top_k = p("top_k", 3).value
         prefix = p("collection_prefix", "semantic_map").value
@@ -57,8 +60,12 @@ class SemanticMapServer(Node):
                                   p("history_size", 200).value)
 
         from qdrant_client import QdrantClient
-        self.index = SemanticIndex(QdrantClient(host=self.qdrant_host, port=self.qdrant_port),
-                                   self.embedder.encode, prefix)
+        if self.qdrant_path:
+            os.makedirs(self.qdrant_path, exist_ok=True)
+            client = QdrantClient(path=self.qdrant_path)
+        else:
+            client = QdrantClient(host=self.qdrant_host, port=self.qdrant_port)
+        self.index = SemanticIndex(client, self.embedder.encode, prefix)
         self.lock = threading.Lock()  # 重建和搜索串行，避免同时写同一个 collection
         self.task_status = None
 
@@ -83,7 +90,8 @@ class SemanticMapServer(Node):
 
         # 后台预加载模型，第一次搜索不用等
         threading.Thread(target=self._preload, daemon=True).start()
-        self.get_logger().info(f"semantic_map_server started (Qdrant {self.qdrant_host}:{self.qdrant_port}, "
+        where = f"local {self.qdrant_path}" if self.qdrant_path else f"{self.qdrant_host}:{self.qdrant_port}"
+        self.get_logger().info(f"semantic_map_server started (Qdrant {where}, "
                                f"text_in={text_in_topic or 'off'}:{self.text_in_action}, "
                                f"log={self.debug_log.path or 'off'})")
 

@@ -38,7 +38,7 @@
 
 | 话题 | 类型 | 作用 |
 |---|---|---|
-| `/semantic_map/text_in` | `std_msgs/msg/String` | 输入：ASR 等模块往这里发一句话（默认只搜索，`text_in_action:=go` 找到就导航） |
+| `/semantic_map/text_in` | `std_msgs/msg/String` | 输入：ASR 等模块往这里发一句话（默认找到就导航；`text_in_action:=search` 只搜索） |
 | `/semantic_map/debug` | `std_msgs/msg/String` | 输出：每次请求一条 JSON（来源、原文、原文问题、前 3 名得分、结果、耗时） |
 
 `data` 可以带来源：`{"text": "我想喝水", "source": "asr"}`。调试记录同时写进 `~/maps/semantic_map_log.jsonl`，
@@ -57,6 +57,8 @@
    ```bash
    docker compose -f src/semantic_map_ros/docker/docker-compose.yml up -d
    ```
+   **没有 Docker 的机器**（如 G1D 用的高通 8550 / AidLux）不用起 Qdrant 服务，用本地文件模式：
+   启动时加 `qdrant_path:=$HOME/maps/semantic_qdrant`（qdrant-client 直接读写这个目录；一个目录同一时间只能一个进程用）。
 3. **编译**：`colcon build --packages-select semantic_map_ros`
 4. **下载模型**（约 2.3 GB，只需一次；国内网络先 `export HF_ENDPOINT=https://hf-mirror.com`）：
    第一次启动节点时自动下载到 `~/.cache/huggingface/`。Thor 不方便联网时，把电脑上下好的
@@ -67,6 +69,8 @@
    ros2 launch semantic_map_ros semantic_map.launch.py use_fp16:=true # Thor / GPU
    ```
    看到 `embedding model loaded` 就可以用了。
+   Thor 上已经做成开机自启（`g1-semantic-map` 服务），参数写在 `robot_bringup/script/g1_autostart.env`，
+   日志在 `/opt/G1/logs/semantic_latest.log`，详见 `robot_bringup/README.md`「开机自启」一节。
 
 ### Thor 实际部署记录（2026-09-29，JetPack 7 / R38.2，CUDA 13）
 

@@ -55,9 +55,12 @@
     <!-- 建图 -->
     <section class="tab" id="tab-mapping" hidden>
       <h2>建图</h2>
-      <p class="note">开始后机器人进入建图模式，地图会实时显示在左边（/map_base64）。</p>
-      <div class="row">
+      <p class="note"><b>开始建图</b>：从空白开始建一张新地图（G1D 会清空机器人上的实时地图，清空前自动备份；要点两次确认）。<br>
+        <b>继续建图</b>：在当前使用的地图上接着建（/mode_set continue_mapping；G1D 支持，G1 后端暂不支持）。<br>
+        建图时地图实时显示在左边（/map_base64）。</p>
+      <div class="row wrap">
         <button id="btnMapStart" class="primary">开始建图</button>
+        <button id="btnMapContinue">继续建图</button>
         <button id="btnMapCancel">取消建图（不保存）</button>
       </div>
       <label for="mapName">地图名称</label>
@@ -175,14 +178,15 @@
     <section class="tab" id="tab-mode" hidden>
       <h2>模式设置（/mode_set）</h2>
       <div class="modes">
-        <button data-mode="mapping">建图<small>mapping</small></button>
+        <button data-mode="mapping">新建图<small>mapping</small></button>
+        <button data-mode="continue_mapping">继续建图<small>continue_mapping</small></button>
         <button data-mode="localization">定位<small>localization</small></button>
         <button data-mode="patrol">导航/巡逻<small>patrol</small></button>
         <button data-mode="remote_control">遥控<small>remote_control</small></button>
         <button data-mode="idle">空闲<small>idle</small></button>
       </div>
       <h2>重定位</h2>
-      <p class="warn">机器人端暂未实现重定位（接口文档 1.1 标注"暂无"），这里只发出消息，仅仿真可用。</p>
+      <p class="warn">发 /initialpose（接口文档 1.1）。G1D：直接设置底盘位姿，会立即生效；G1：Lightning 定位里的订阅还没实机验证。</p>
       <div class="row">
         <button id="btnRelocate">在地图上拖动设置位姿</button>
         <button id="btnRelocateZero">回到原点</button>
@@ -198,6 +202,6 @@
 <div id="toast" role="status" aria-live="polite"></div>
 
 <script src="vendor/roslib.js"></script>
-<script src="app.js?v=3"></script>
+<script src="app.js?v=5"></script>
 </body>
 </html>

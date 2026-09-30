@@ -96,3 +96,16 @@ def test_each_map_has_its_own_collection():
     assert idx.search(2, "喝水", 0.0)["best"]["name"] == "仓库"   # 地图 2 只有仓库
     idx.rebuild(3, [])
     assert idx.client.count(idx.collection(3)).count == 0
+
+
+def test_local_path_mode_persists(tmp_path):
+    # 没有 Qdrant 服务的机器（8550）用 QdrantClient(path=...)：关掉重开后向量还在（新进程第一次仍会按签名重建一次）
+    places = parse_point_rows(json.dumps([row(1, "茶水间", "喝水"), row(2, "仓库", "放工具")]))
+    c1 = qdrant_client.QdrantClient(path=str(tmp_path))
+    SemanticIndex(c1, fake_encode, "t").rebuild(5, places)
+    c1.close()
+    c2 = qdrant_client.QdrantClient(path=str(tmp_path))
+    idx = SemanticIndex(c2, fake_encode, "t")
+    assert c2.count(idx.collection(5)).count == 2
+    assert idx.search(5, "喝水", 0.0)["best"]["name"] == "茶水间"
+    c2.close()

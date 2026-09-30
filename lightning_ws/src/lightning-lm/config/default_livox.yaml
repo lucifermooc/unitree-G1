@@ -135,6 +135,42 @@ lidar_loc:
   fast_converge_pos: 0.05
   fast_converge_ok_frames: 3
   fast_converge_max_frames: 50
+# 定位一致性守护（lidar_loc/loc_guard.h）。2026-09-29 实测：NDT 在走廊两个局部最优间来回跳，
+# 每帧只注入 10% 残差，几分钟累积 ~2 m / 19°，而 LIO 85 分钟回原点只差 9 cm。这里在窗口内比较
+# "输出相对运动"与"LIO 相对运动"，差值（NDT 注入的累积修正）超限且腿式里程计不反对 LIO 时冻结修正。
+# 当天正常波动 <= 0.19 m，出事时 0.64 m。
+# 2026-09-29 离线 A/B（locguard_0929 包注入 0.55 m NDT 偏差）：freeze 把 16 m 漂移压到 5 m 但挡不住——
+# 里程计阈值过紧（正常行走 18% 窗口误判不一致）导致冻结/解冻来回切约 100 次，冻结后也无法自动恢复。
+# 根因是走廊尽头地图双解（横向偏 0.1 m 纵向解跳 0.5 m），先重建地图；守护暂只告警 + /lightning/loc_status 观察。
+# 2026-09-30 新图实测：导航（~0.3 m/s、两端快速转身）下 NDT 把输出沿走廊拉走 1.5~2.2 m，全程 LIO 与腿式里程计互差 ~0.1 m；
+# 守护每次都判对了。改为 freeze + rollback：判定后冻结修正，并把窗口内已注入的修正退回（输出 = 参考帧修正量 × 当前 LIO），
+# 里程计阈值放宽到 09-29 实测 p95 并要求连续 odom_persist_frames 帧才改判（原阈值导航转身时来回切 ~70 次）。
+loc_guard:
+  enabled: true
+  action: freeze            # freeze = 冻结修正只跟 LIO；warn = 只告警
+  rollback: true            # 冻结时退回窗口内累积的修正（false = 只冻结，停在已被拉偏的位置）
+  window_sec: 60.0          # 静止时的慢拉（09-30 14:51，40 s 拉走 0.19 m）要长窗口才看得出
+  window_dist: 5.0
+  max_drift_m: 0.20         # 手动慢走时窗口内修正 <= 0.18 m；导航出事时几秒内就过 0.2
+  max_drift_deg: 5.0
+  static_travel_m: 0.30     # 窗口内 LIO 路程 < 该值视为静止
+  max_drift_static_m: 0.10  # 静止时 LIO 20 min 只漂 ~5 cm，NDT 不该有明显修正
+  recover_frames: 10        # 连续 N 帧 NDT 残差 < recover_res_* 后恢复
+  recover_res_m: 0.15
+  recover_res_deg: 2.0
+  reloc_hint_frames: 30     # 冻结超过 N 帧仍未恢复，/lightning/loc_status 提示 need_reloc
+  odom_topic: /odom         # g1_nav_bridge/sport_to_odom（navigation 模式才有）；"" 不用里程计
+  odom_tol_m: 0.15          # LIO 与里程计一致：误差 < odom_tol_m + odom_tol_ratio * 行程，且航向差 < odom_tol_deg
+  odom_tol_ratio: 0.15      # 09-29 实测误差/行程 p95 10.9%、航向 p95 6°
+  odom_tol_deg: 10.0
+  odom_persist_frames: 5    # 里程计连续 N 帧不一致才怪 LIO（连续 N 帧一致才从 LIO_SUSPECT 改判 NDT）
+  init_yaw_search_deg: 15.0 # /initialpose 重定位时在给定航向左右搜索的范围；0 = 不搜
+  init_yaw_search_step_deg: 3.0
+# 送给激光定位（NDT）的点云。上游行为：当前帧 + 最多 5 个历史关键帧各取最早 1001 点（按 LIO 相对位姿摆到当前帧）。
+# fasterlio.proj_kfs 管不到这条路径（上游的判断被注释掉了）。2026-09-30 起投影在副本上做并跳过当前帧自身
+# （原来原地追加，当前帧是新关键帧时会一边遍历自身一边 push_back）。false = 只用当前帧，用于实机 A/B（开—关—开）。
+loc_input:
+  proj_kfs: true
 maps:
   delete_when_unload: false
   dyn_cloud_policy: persistent
