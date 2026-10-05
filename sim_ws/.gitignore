@@ -1,0 +1,5 @@
+build/
+install/
+log/
+# install.sh 下载的 Go2 网格（BSD-3，来自 unitree_ros），不入库
+src/robot_nav_sim/meshes/go2/

@@ -1,0 +1,56 @@
+<?xml version="1.0"?>
+<!-- 差速小车：两个驱动轮 + 前后万向球，尺寸接近常见的室内 AGV（0.50 x 0.40 m）。 -->
+<robot name="diff_car" xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <xacro:include filename="$(find robot_nav_sim)/urdf/common.xacro"/>
+
+  <xacro:property name="wheel_r" value="0.075"/>
+  <xacro:property name="wheel_w" value="0.045"/>
+  <xacro:property name="wheel_sep" value="0.44"/>
+  <xacro:property name="body_l" value="0.50"/>
+  <xacro:property name="body_w" value="0.38"/>
+  <xacro:property name="body_t" value="0.16"/>
+  <!-- 底盘中心离地高度：轮心高度 wheel_r，底盘中心再高 0.05 -->
+  <xacro:property name="body_z" value="${wheel_r + 0.05}"/>
+
+  <material name="car_blue"><color rgba="0.16 0.36 0.62 1"/></material>
+  <material name="deck_grey"><color rgba="0.30 0.31 0.33 1"/></material>
+
+  <link name="base_footprint"/>
+  <joint name="base_joint" type="fixed">
+    <parent link="base_footprint"/>
+    <child link="base_link"/>
+    <origin xyz="0 0 ${body_z}" rpy="0 0 0"/>
+  </joint>
+
+  <link name="base_link">
+    <inertial>
+      <mass value="12.0"/>
+      <inertia ixx="0.17" ixy="0" ixz="0" iyy="0.27" iyz="0" izz="0.40"/>
+    </inertial>
+    <visual>
+      <geometry><box size="${body_l} ${body_w} ${body_t}"/></geometry>
+      <material name="car_blue"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 ${body_t / 2 + 0.01}" rpy="0 0 0"/>
+      <geometry><box size="${body_l - 0.04} ${body_w - 0.04} 0.02"/></geometry>
+      <material name="deck_grey"/>
+    </visual>
+    <collision>
+      <geometry><box size="${body_l} ${body_w} ${body_t}"/></geometry>
+    </collision>
+  </link>
+
+  <xacro:drive_wheel name="left_wheel"  parent="base_link" xyz="0 ${wheel_sep / 2} ${wheel_r - body_z}"
+                     radius="${wheel_r}" width="${wheel_w}"/>
+  <xacro:drive_wheel name="right_wheel" parent="base_link" xyz="0 ${-wheel_sep / 2} ${wheel_r - body_z}"
+                     radius="${wheel_r}" width="${wheel_w}"/>
+  <xacro:caster name="front_caster" parent="base_link" xyz="0.19 0 ${0.035 - body_z}" radius="0.035" visible="true"/>
+  <xacro:caster name="rear_caster"  parent="base_link" xyz="-0.19 0 ${0.035 - body_z}" radius="0.035" visible="true"/>
+
+  <!-- Mid-360 装在车顶中间 -->
+  <xacro:mid360 parent="base_link" xyz="0.10 0 ${body_t / 2 + 0.085}"/>
+
+  <xacro:diff_drive_plugin separation="${wheel_sep}" radius="${wheel_r}" max_v="1.0" max_w="2.0"/>
+  <xacro:common_plugins/>
+</robot>

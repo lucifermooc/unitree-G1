@@ -1,0 +1,110 @@
+<?xml version="1.0"?>
+<!--
+  阿克曼小车：后轮驱动、前轮转向，尺寸约 0.80 x 0.46 m，轴距 0.55 m，最大转角 0.6 rad
+  （最小转弯半径约 0.8 m）。和差速车最大的区别：不能原地转向，Nav2 要换成考虑最小转弯半径的
+  规划器（Smac Hybrid-A*）和控制器（Regulated Pure Pursuit）。
+-->
+<robot name="ackermann_car" xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <xacro:include filename="$(find robot_nav_sim)/urdf/common.xacro"/>
+
+  <xacro:property name="wheel_r" value="0.10"/>
+  <xacro:property name="wheel_w" value="0.06"/>
+  <xacro:property name="wheel_base" value="0.55"/>
+  <xacro:property name="track" value="0.46"/>
+  <xacro:property name="kingpin" value="0.40"/>
+  <xacro:property name="steer_limit" value="0.6"/>
+  <xacro:property name="body_l" value="0.80"/>
+  <xacro:property name="body_w" value="0.40"/>
+  <xacro:property name="body_t" value="0.16"/>
+  <xacro:property name="body_z" value="${wheel_r + 0.06}"/>
+  <!-- base_link 放在后轴中心正上方，和阿克曼运动学的参考点一致 -->
+  <xacro:property name="body_cx" value="${wheel_base / 2}"/>
+
+  <material name="car_orange"><color rgba="0.86 0.45 0.14 1"/></material>
+  <material name="deck_grey"><color rgba="0.30 0.31 0.33 1"/></material>
+
+  <link name="base_footprint"/>
+  <joint name="base_joint" type="fixed">
+    <parent link="base_footprint"/>
+    <child link="base_link"/>
+    <origin xyz="0 0 ${body_z}" rpy="0 0 0"/>
+  </joint>
+
+  <link name="base_link">
+    <inertial>
+      <origin xyz="${body_cx} 0 0"/>
+      <mass value="18.0"/>
+      <inertia ixx="0.28" ixy="0" ixz="0" iyy="1.0" iyz="0" izz="1.2"/>
+    </inertial>
+    <visual>
+      <origin xyz="${body_cx} 0 0" rpy="0 0 0"/>
+      <geometry><box size="${body_l} ${body_w} ${body_t}"/></geometry>
+      <material name="car_orange"/>
+    </visual>
+    <visual>
+      <origin xyz="${body_cx - 0.05} 0 ${body_t / 2 + 0.01}" rpy="0 0 0"/>
+      <geometry><box size="0.55 0.34 0.02"/></geometry>
+      <material name="deck_grey"/>
+    </visual>
+    <collision>
+      <origin xyz="${body_cx} 0 0" rpy="0 0 0"/>
+      <geometry><box size="${body_l} ${body_w} ${body_t}"/></geometry>
+    </collision>
+  </link>
+
+  <!-- 后轮（驱动） -->
+  <xacro:drive_wheel name="rear_left_wheel"  parent="base_link" xyz="0 ${track / 2} ${wheel_r - body_z}"
+                     radius="${wheel_r}" width="${wheel_w}" mass="0.8"/>
+  <xacro:drive_wheel name="rear_right_wheel" parent="base_link" xyz="0 ${-track / 2} ${wheel_r - body_z}"
+                     radius="${wheel_r}" width="${wheel_w}" mass="0.8"/>
+
+  <!-- 前轮：转向节（绕 z 轴）+ 车轮（自由滚动） -->
+  <xacro:macro name="steer_wheel" params="side ly">
+    <joint name="front_${side}_steer_joint" type="revolute">
+      <parent link="base_link"/>
+      <child link="front_${side}_steer"/>
+      <origin xyz="${wheel_base} ${ly * kingpin / 2} ${wheel_r - body_z}" rpy="0 0 0"/>
+      <axis xyz="0 0 1"/>
+      <limit lower="${-steer_limit}" upper="${steer_limit}" effort="50" velocity="3.0"/>
+    </joint>
+    <link name="front_${side}_steer">
+      <inertial>
+        <mass value="0.3"/>
+        <inertia ixx="0.0005" ixy="0" ixz="0" iyy="0.0005" iyz="0" izz="0.0005"/>
+      </inertial>
+    </link>
+    <xacro:drive_wheel name="front_${side}_wheel" parent="front_${side}_steer"
+                       xyz="0 ${ly * (track - kingpin) / 2} 0" radius="${wheel_r}" width="${wheel_w}" mass="0.8"/>
+  </xacro:macro>
+  <xacro:steer_wheel side="left" ly="1"/>
+  <xacro:steer_wheel side="right" ly="-1"/>
+
+  <!-- Mid-360 装在车顶前部 -->
+  <xacro:mid360 parent="base_link" xyz="${wheel_base} 0 ${body_t / 2 + 0.085}"/>
+
+  <gazebo>
+    <!-- 阿克曼转向：订阅 /robot/cmd_vel（Twist，按 v 和 w 换算前轮转角），发布里程计 -->
+    <plugin filename="gz-sim-ackermann-steering-system" name="gz::sim::systems::AckermannSteering">
+      <left_joint>rear_left_wheel_joint</left_joint>
+      <right_joint>rear_right_wheel_joint</right_joint>
+      <left_steering_joint>front_left_steer_joint</left_steering_joint>
+      <right_steering_joint>front_right_steer_joint</right_steering_joint>
+      <kingpin_width>${kingpin}</kingpin_width>
+      <steering_limit>${steer_limit}</steering_limit>
+      <wheel_base>${wheel_base}</wheel_base>
+      <wheel_separation>${track}</wheel_separation>
+      <wheel_radius>${wheel_r}</wheel_radius>
+      <min_velocity>-1.0</min_velocity>
+      <max_velocity>1.0</max_velocity>
+      <min_acceleration>-2.0</min_acceleration>
+      <max_acceleration>1.5</max_acceleration>
+      <topic>/robot/cmd_vel</topic>
+      <odom_topic>/robot/odom</odom_topic>
+      <tf_topic>/robot/tf</tf_topic>
+      <frame_id>odom</frame_id>
+      <child_frame_id>base_footprint</child_frame_id>
+      <odom_publish_frequency>50</odom_publish_frequency>
+    </plugin>
+  </gazebo>
+  <xacro:common_plugins/>
+</robot>
