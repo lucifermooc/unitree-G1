@@ -2,6 +2,14 @@
 <!-- 三台机器人共用的部分：Mid-360 雷达 + IMU、关节状态、仿真真值。话题名对三台机器人都一样。 -->
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
 
+  <!-- 坐标系名。默认 base_footprint（脚下）/ base_link（躯干），配合本包自带的 Nav2。
+       接 Lightning-LM 时改成 root_link:=body_link trunk_link:=trunk：
+       Lightning 自己发布 map->base_link->body_link 和 base_link->base_footprint，URDF 里不能再出现这两个名字。 -->
+  <xacro:arg name="root_link" default="base_footprint"/>
+  <xacro:arg name="trunk_link" default="base_link"/>
+  <xacro:property name="root" value="$(arg root_link)"/>
+  <xacro:property name="trunk" value="$(arg trunk_link)"/>
+
   <material name="lidar_black"><color rgba="0.08 0.08 0.09 1"/></material>
 
   <!--
@@ -85,7 +93,7 @@
       </plugin>
       <plugin filename="gz-sim-odometry-publisher-system" name="gz::sim::systems::OdometryPublisher">
         <odom_frame>world</odom_frame>
-        <robot_base_frame>base_footprint</robot_base_frame>
+        <robot_base_frame>${root}</robot_base_frame>
         <odom_topic>/robot/ground_truth</odom_topic>
         <tf_topic>/robot/ground_truth/tf</tf_topic>
         <dimensions>3</dimensions>
@@ -110,7 +118,7 @@
         <odom_topic>/robot/odom</odom_topic>
         <tf_topic>/robot/tf</tf_topic>
         <frame_id>odom</frame_id>
-        <child_frame_id>base_footprint</child_frame_id>
+        <child_frame_id>${root}</child_frame_id>
         <odom_publish_frequency>50</odom_publish_frequency>
       </plugin>
     </gazebo>
@@ -134,7 +142,7 @@
         <odom_topic>/robot/odom</odom_topic>
         <tf_topic>/robot/tf</tf_topic>
         <frame_id>odom</frame_id>
-        <child_frame_id>base_footprint</child_frame_id>
+        <child_frame_id>${root}</child_frame_id>
         <odom_publish_frequency>50</odom_publish_frequency>
       </plugin>
     </gazebo>

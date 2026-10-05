@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+"""把仿真 Mid-360 的 PointCloud2 转成 livox_ros_driver2/CustomMsg，冒充真机驱动的 /livox/lidar。
+
+这样 Lightning-LM 可以原样用真机配置（lidar_type: 1，订阅 /livox/lidar），下游完全不用改。
+
+- 消息用 numpy 直接拼 CDR 字节再 publish_raw：逐点构造 Python 消息对象每帧要几百毫秒，跟不上 10 Hz。
+- offset_time 全部为 0：Gazebo 的雷达是一次性瞬时采样，没有真机扫描过程中的运动畸变，
+  填假的时间偏移反而会让 Lightning 做错误的去畸变。
+- line = ring % 4（真机 Mid-360 是 4 线编号），tag = 0（高置信度），无回波的点丢掉。
+
+需要先 source 你的 lightning_ws（提供 livox_ros_driver2 消息）。
+"""
+import struct
+
+import numpy as np
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import PointCloud2
+
+try:
+    from livox_ros_driver2.msg import CustomMsg
+except ImportError as e:  # noqa: F841
+    raise SystemExit("找不到 livox_ros_driver2 消息：先 source 你的 lightning_ws/install/setup.bash")
+
+PF_TYPES = {1: "i1", 2: "u1", 3: "i2", 4: "u2", 5: "i4", 6: "u4", 7: "f4", 8: "f8"}
+POINT = np.dtype({"names": ["offset_time", "x", "y", "z", "reflectivity", "tag", "line"],
+                  "formats": ["<u4", "<f4", "<f4", "<f4", "u1", "u1", "u1"],
+                  "offsets": [0, 4, 8, 12, 16, 17, 18], "itemsize": 20})  # CDR：每个点按 4 字节对齐，19 -> 20
+
+
+def pad(buf, align):
+    """CDR 对齐：偏移从 4 字节封装头之后开始计算。"""
+    n = (len(buf) - 4) % align
+    if n:
+        buf.extend(b"\x00" * (align - n))
+
+
+class LivoxBridge(Node):
+    def __init__(self):
+        super().__init__("livox_bridge")
+        self.declare_parameter("input_topic", "/livox/points")
+        self.declare_parameter("output_topic", "/livox/lidar")
+        self.declare_parameter("min_range", 0.1)
+        self.declare_parameter("max_range", 39.9)
+        self.min_r = float(self.get_parameter("min_range").value)
+        self.max_r = float(self.get_parameter("max_range").value)
+        self.pub = self.create_publisher(CustomMsg, self.get_parameter("output_topic").value, 10)
+        self.create_subscription(PointCloud2, self.get_parameter("input_topic").value, self.on_cloud,
+                                 qos_profile_sensor_data)
+        self.dtype = None
+        self.count = 0
+
+    def cloud_dtype(self, msg):
+        names, formats, offsets = [], [], []
+        for f in msg.fields:
+            if f.name in ("x", "y", "z", "intensity", "ring"):
+                names.append(f.name)
+                formats.append(("<" if not msg.is_bigendian else ">") + PF_TYPES[f.datatype])
+                offsets.append(f.offset)
+        return np.dtype({"names": names, "formats": formats, "offsets": offsets, "itemsize": msg.point_step})
+
+    def on_cloud(self, msg):
+        if self.dtype is None:
+            self.dtype = self.cloud_dtype(msg)
+        n_in = msg.width * msg.height
+        arr = np.frombuffer(bytes(msg.data), dtype=self.dtype, count=n_in)
+        x, y, z = arr["x"], arr["y"], arr["z"]
+        r = np.sqrt(x * x + y * y + z * z)
+        ok = np.isfinite(r) & (r > self.min_r) & (r < self.max_r)
+        n = int(ok.sum())
+
+        pts = np.zeros(n, dtype=POINT)
+        pts["x"], pts["y"], pts["z"] = x[ok], y[ok], z[ok]
+        if "intensity" in arr.dtype.names:
+            pts["reflectivity"] = np.clip(arr["intensity"][ok], 0, 255).astype(np.uint8)
+        if "ring" in arr.dtype.names:
+            pts["line"] = (arr["ring"][ok] % 4).astype(np.uint8)
+
+        sec, nsec = msg.header.stamp.sec, msg.header.stamp.nanosec
+        frame = msg.header.frame_id.encode() + b"\x00"
+        buf = bytearray(b"\x00\x01\x00\x00")                 # CDR little-endian 封装头
+        buf += struct.pack("<iI", sec, nsec)                 # header.stamp
+        buf += struct.pack("<I", len(frame)) + frame         # header.frame_id
+        pad(buf, 8)
+        buf += struct.pack("<Q", sec * 1_000_000_000 + nsec)  # timebase（纳秒）
+        buf += struct.pack("<I", n)                          # point_num
+        buf += bytes([0, 0, 0, 0])                           # lidar_id + rsvd[3]
+        pad(buf, 4)
+        buf += struct.pack("<I", n)                          # points 序列长度
+        buf += pts.tobytes()[:-1]                             # 最后一个点后面不补齐（19 字节）
+        self.pub.publish(bytes(buf))
+
+        self.count += 1
+        if self.count == 1:
+            self.get_logger().info(f"开始转发：{n_in} 点/帧 -> {n} 个有效点，frame={msg.header.frame_id}")
+
+
+def main():
+    rclpy.init()
+    node = LivoxBridge()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    node.destroy_node()
+    rclpy.try_shutdown()
+
+
+if __name__ == "__main__":
+    main()

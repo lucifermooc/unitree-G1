@@ -15,14 +15,14 @@
   <material name="car_blue"><color rgba="0.16 0.36 0.62 1"/></material>
   <material name="deck_grey"><color rgba="0.30 0.31 0.33 1"/></material>
 
-  <link name="base_footprint"/>
+  <link name="${root}"/>
   <joint name="base_joint" type="fixed">
-    <parent link="base_footprint"/>
-    <child link="base_link"/>
+    <parent link="${root}"/>
+    <child link="${trunk}"/>
     <origin xyz="0 0 ${body_z}" rpy="0 0 0"/>
   </joint>
 
-  <link name="base_link">
+  <link name="${trunk}">
     <inertial>
       <mass value="12.0"/>
       <inertia ixx="0.17" ixy="0" ixz="0" iyy="0.27" iyz="0" izz="0.40"/>
@@ -41,15 +41,15 @@
     </collision>
   </link>
 
-  <xacro:drive_wheel name="left_wheel"  parent="base_link" xyz="0 ${wheel_sep / 2} ${wheel_r - body_z}"
+  <xacro:drive_wheel name="left_wheel"  parent="${trunk}" xyz="0 ${wheel_sep / 2} ${wheel_r - body_z}"
                      radius="${wheel_r}" width="${wheel_w}"/>
-  <xacro:drive_wheel name="right_wheel" parent="base_link" xyz="0 ${-wheel_sep / 2} ${wheel_r - body_z}"
+  <xacro:drive_wheel name="right_wheel" parent="${trunk}" xyz="0 ${-wheel_sep / 2} ${wheel_r - body_z}"
                      radius="${wheel_r}" width="${wheel_w}"/>
-  <xacro:caster name="front_caster" parent="base_link" xyz="0.19 0 ${0.035 - body_z}" radius="0.035" visible="true"/>
-  <xacro:caster name="rear_caster"  parent="base_link" xyz="-0.19 0 ${0.035 - body_z}" radius="0.035" visible="true"/>
+  <xacro:caster name="front_caster" parent="${trunk}" xyz="0.19 0 ${0.035 - body_z}" radius="0.035" visible="true"/>
+  <xacro:caster name="rear_caster"  parent="${trunk}" xyz="-0.19 0 ${0.035 - body_z}" radius="0.035" visible="true"/>
 
   <!-- Mid-360 装在车顶中间 -->
-  <xacro:mid360 parent="base_link" xyz="0.10 0 ${body_t / 2 + 0.085}"/>
+  <xacro:mid360 parent="${trunk}" xyz="0.10 0 ${body_t / 2 + 0.085}"/>
 
   <xacro:diff_drive_plugin separation="${wheel_sep}" radius="${wheel_r}" max_v="1.0" max_w="2.0"/>
   <xacro:common_plugins/>

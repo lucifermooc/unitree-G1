@@ -108,12 +108,13 @@ if [ "$DO_APT" -eq 1 ]; then
     gz-harmonic \
     ros-humble-ros-gzharmonic \
     ros-humble-navigation2 ros-humble-nav2-bringup ros-humble-nav2-simple-commander \
+    ros-humble-nav2-mppi-controller ros-humble-spatio-temporal-voxel-layer \
     ros-humble-slam-toolbox \
     ros-humble-pointcloud-to-laserscan \
     ros-humble-xacro ros-humble-robot-state-publisher \
     ros-humble-teleop-twist-keyboard \
     ros-humble-rviz2 \
-    python3-colcon-common-extensions python3-yaml >/dev/null
+    python3-colcon-common-extensions python3-yaml python3-numpy >/dev/null
   echo "依赖安装完成"
 fi
 
@@ -171,6 +172,11 @@ $(echo -e "\033[1;32m安装完成\033[0m")
   # 跨楼层导航（仅 Go2）：导航到楼梯口 -> 爬楼梯 -> 切换二楼地图 -> 导航到目标
   ros2 launch robot_nav_sim navigation.launch.py robot:=go2
   ros2 run robot_nav_sim go_to --floor 2 --x 3.0 --y 2.0
+
+  # 接你自己的 Lightning-LM + Nav2（先 source lightning_ws，再 source sim_ws）
+  ros2 launch robot_nav_sim lightning.launch.py mode:=mapping robot:=go2 world:=flat
+  ros2 service call /lightning/save_map lightning/srv/SaveMap "{map_id: sim_go2_flat}"
+  ros2 launch robot_nav_sim lightning.launch.py mode:=navigation robot:=go2 world:=flat
 
 详细说明见 $WS_DIR/README.md
 EOF

@@ -21,14 +21,14 @@
   <material name="body_grey"><color rgba="0.82 0.83 0.85 1"/></material>
   <material name="leg_dark"><color rgba="0.20 0.21 0.23 1"/></material>
 
-  <link name="base_footprint"/>
+  <link name="${root}"/>
   <joint name="base_joint" type="fixed">
-    <parent link="base_footprint"/>
-    <child link="base_link"/>
+    <parent link="${root}"/>
+    <child link="${trunk}"/>
     <origin xyz="0 0 ${body_h}" rpy="0 0 0"/>
   </joint>
 
-  <link name="base_link">
+  <link name="${trunk}">
     <inertial>
       <!-- 质心故意放低到离地约 0.13 m：隐藏底盘轴距短（为了能原地转），
            真实高度的质心在 25° 楼梯上会向后翻 -->
@@ -53,7 +53,7 @@
   <!-- 一条腿：全部是 fixed 关节，只做外观（不参与碰撞） -->
   <xacro:macro name="leg" params="name fx ly hip_rpy thigh_mesh calf_mesh">
     <joint name="${name}_hip_joint" type="fixed">
-      <parent link="base_link"/>
+      <parent link="${trunk}"/>
       <child link="${name}_hip"/>
       <origin xyz="${fx * 0.1934} ${ly * 0.0465} 0" rpy="0 0 0"/>
     </joint>
@@ -132,17 +132,17 @@
        轮距（0.36）要比轴距（0.24）宽、摩擦系数不能太大（0.8），否则横向摩擦会把原地转向锁死；
        0.8 仍远大于爬 25° 坡需要的 tan(25°)≈0.47。 -->
   <xacro:property name="wheel_x" value="0.12"/>
-  <xacro:drive_wheel name="front_left_wheel"  parent="base_link" xyz="${wheel_x} ${wheel_sep / 2} ${wheel_r - body_h}"
+  <xacro:drive_wheel name="front_left_wheel"  parent="${trunk}" xyz="${wheel_x} ${wheel_sep / 2} ${wheel_r - body_h}"
                      radius="${wheel_r}" width="0.04" visible="false" mu="0.8"/>
-  <xacro:drive_wheel name="front_right_wheel" parent="base_link" xyz="${wheel_x} ${-wheel_sep / 2} ${wheel_r - body_h}"
+  <xacro:drive_wheel name="front_right_wheel" parent="${trunk}" xyz="${wheel_x} ${-wheel_sep / 2} ${wheel_r - body_h}"
                      radius="${wheel_r}" width="0.04" visible="false" mu="0.8"/>
-  <xacro:drive_wheel name="rear_left_wheel"   parent="base_link" xyz="${-wheel_x} ${wheel_sep / 2} ${wheel_r - body_h}"
+  <xacro:drive_wheel name="rear_left_wheel"   parent="${trunk}" xyz="${-wheel_x} ${wheel_sep / 2} ${wheel_r - body_h}"
                      radius="${wheel_r}" width="0.04" visible="false" mu="0.8"/>
-  <xacro:drive_wheel name="rear_right_wheel"  parent="base_link" xyz="${-wheel_x} ${-wheel_sep / 2} ${wheel_r - body_h}"
+  <xacro:drive_wheel name="rear_right_wheel"  parent="${trunk}" xyz="${-wheel_x} ${-wheel_sep / 2} ${wheel_r - body_h}"
                      radius="${wheel_r}" width="0.04" visible="false" mu="0.8"/>
 
   <!-- Mid-360 装在机身前上方 -->
-  <xacro:mid360 parent="base_link" xyz="0.19 0 0.105"/>
+  <xacro:mid360 parent="${trunk}" xyz="0.19 0 0.105"/>
 
   <!-- 滑移转向的等效轮距：原地转时轮子打滑，实际转得比运动学少（实测约 0.73 倍），
        所以插件里的轮距按 0.36 / 0.73 ≈ 0.49 标定，让 cmd_vel 和里程计的角速度都对得上 -->
