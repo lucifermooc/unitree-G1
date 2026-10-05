@@ -1,0 +1,17 @@
+# 从 Mid-360 点云切出一层 2D 激光（给 AMCL、slam_toolbox、costmap 用）。
+# target_frame 用 base_footprint：高度窗口相对机器人脚底，所以在一楼、二楼都一样。
+pointcloud_to_laserscan:
+  ros__parameters:
+    use_sim_time: true
+    target_frame: base_footprint
+    transform_tolerance: 0.05
+    min_height: 0.10
+    max_height: 1.00
+    angle_min: -3.14159
+    angle_max: 3.14159
+    angle_increment: 0.0087
+    scan_time: 0.1
+    range_min: 0.25
+    range_max: 30.0
+    use_inf: true
+    inf_epsilon: 1.0

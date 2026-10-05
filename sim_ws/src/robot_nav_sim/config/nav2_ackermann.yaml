@@ -1,0 +1,84 @@
+# 阿克曼车：不能原地转向。
+# 规划器换成 Smac Hybrid-A*（考虑最小转弯半径），控制器换成 Regulated Pure Pursuit（不原地转向）。
+# base_footprint 在后轴中心，车身向前伸 0.675 m、向后 0.125 m。
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      width: 6
+      height: 6
+      footprint: "[[0.70, 0.25], [0.70, -0.25], [-0.15, -0.25], [-0.15, 0.25]]"
+      inflation_layer:
+        inflation_radius: 0.55
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      footprint: "[[0.70, 0.25], [0.70, -0.25], [-0.15, -0.25], [-0.15, 0.25]]"
+      inflation_layer:
+        inflation_radius: 0.55
+
+planner_server:
+  ros__parameters:
+    planner_plugins: ["GridBased"]
+    GridBased:
+      plugin: "nav2_smac_planner/SmacPlannerHybrid"
+      tolerance: 0.5
+      downsample_costmap: false
+      downsampling_factor: 1
+      allow_unknown: true
+      max_iterations: 1000000
+      max_on_approach_iterations: 1000
+      max_planning_time: 5.0
+      motion_model_for_search: "DUBIN"     # 只前进；想允许倒车改成 REEDS_SHEPP
+      angle_quantization_bins: 72
+      analytic_expansion_ratio: 3.5
+      analytic_expansion_max_length: 3.0
+      minimum_turning_radius: 0.90         # 轴距 0.55 / tan(0.6 rad) ≈ 0.81 m，留一点余量
+      reverse_penalty: 2.0
+      change_penalty: 0.0
+      non_straight_penalty: 1.2
+      cost_penalty: 2.0
+      retrospective_penalty: 0.015
+      lookup_table_size: 20.0
+      cache_obstacle_heuristic: false
+      smooth_path: true
+      smoother:
+        max_iterations: 1000
+        w_smooth: 0.3
+        w_data: 0.2
+        tolerance: 1.0e-10
+        do_refinement: true
+
+controller_server:
+  ros__parameters:
+    general_goal_checker:
+      xy_goal_tolerance: 0.30
+      yaw_goal_tolerance: 0.6
+    FollowPath:
+      plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+      desired_linear_vel: 0.5
+      lookahead_dist: 0.8
+      min_lookahead_dist: 0.5
+      max_lookahead_dist: 1.5
+      lookahead_time: 1.5
+      rotate_to_heading_angular_vel: 1.0
+      transform_tolerance: 0.2
+      use_velocity_scaled_lookahead_dist: true
+      min_approach_linear_velocity: 0.1
+      approach_velocity_scaling_dist: 0.8
+      use_collision_detection: true
+      max_allowed_time_to_collision_up_to_carrot: 1.5
+      use_regulated_linear_velocity_scaling: true
+      use_cost_regulated_linear_velocity_scaling: false
+      regulated_linear_scaling_min_radius: 0.9
+      regulated_linear_scaling_min_speed: 0.2
+      use_rotate_to_heading: false         # 阿克曼不能原地转
+      allow_reversing: false
+      rotate_to_heading_min_angle: 0.785
+      max_angular_accel: 3.2
+      max_robot_pose_search_dist: 10.0
+      use_interpolation: true
+
+velocity_smoother:
+  ros__parameters:
+    max_velocity: [0.6, 0.0, 1.0]
+    min_velocity: [-0.6, 0.0, -1.0]

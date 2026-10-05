@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""楼层管理：切换每层的 2D 地图，并给 AMCL 重新设初始位姿。
+
+两种触发方式：
+1. /floor_request（std_msgs/Int32）：go_to 爬完楼梯后发。初始位姿用 floors.yaml 里该层的 stair_landing。
+2. auto_detect=true 时：按仿真真值 /ground_truth 的高度判断楼层（机器人在新楼层停稳 1 秒后切换），
+   初始位姿直接用真值。这是仿真里的捷径，真机要换成楼梯口已知位姿或 3D 定位（如 Lightning-LM）。
+
+发布 /current_floor（Int32，latched）。
+"""
+import math
+import os
+
+import rclpy
+import yaml
+from geometry_msgs.msg import PoseWithCovarianceStamped
+from nav2_msgs.srv import LoadMap
+from nav_msgs.msg import Odometry
+from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile
+from std_msgs.msg import Int32
+
+
+class FloorManager(Node):
+    def __init__(self):
+        super().__init__("floor_manager")
+        self.declare_parameter("floors_file", "")
+        self.declare_parameter("maps_dir", "")
+        self.declare_parameter("initial_floor", 1)
+        self.declare_parameter("auto_detect", True)
+        with open(self.get_parameter("floors_file").value) as f:
+            self.floors = {int(k): v for k, v in yaml.safe_load(f)["floors"].items()}
+        self.maps_dir = self.get_parameter("maps_dir").value
+        self.auto = self.get_parameter("auto_detect").value
+        self.current = int(self.get_parameter("initial_floor").value)
+        self.switching = False
+        self.candidate = None
+        self.candidate_since = None
+        self.gt = None
+
+        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.pub_floor = self.create_publisher(Int32, "/current_floor", latched)
+        self.pub_pose = self.create_publisher(PoseWithCovarianceStamped, "/initialpose", 10)
+        self.load_cli = self.create_client(LoadMap, "/map_server/load_map")
+        self.create_subscription(Int32, "/floor_request", self.on_request, 10)
+        self.create_subscription(Odometry, "/ground_truth", self.on_gt, 10)
+        self.create_timer(0.2, self.tick)
+        self.publish_floor()
+        self.get_logger().info(f"楼层管理已启动，当前 {self.current} 楼，自动识别：{self.auto}")
+
+    def publish_floor(self):
+        self.pub_floor.publish(Int32(data=self.current))
+
+    def on_gt(self, msg):
+        self.gt = msg
+
+    def on_request(self, msg):
+        floor = int(msg.data)
+        if floor not in self.floors:
+            self.get_logger().error(f"没有 {floor} 楼")
+            return
+        if floor == self.current:
+            self.publish_floor()
+            return
+        lp = self.floors[floor]["stair_landing"]
+        self.switch(floor, (lp["x"], lp["y"], lp["yaw"]), "请求")
+
+    def tick(self):
+        if not self.auto or self.gt is None or self.switching:
+            return
+        p = self.gt.pose.pose.position
+        v = self.gt.twist.twist.linear
+        speed = math.hypot(v.x, v.y)
+        floor = min(self.floors, key=lambda k: abs(self.floors[k]["height"] - p.z))
+        on_level = abs(self.floors[floor]["height"] - p.z) < 0.15
+        now = self.get_clock().now().nanoseconds * 1e-9
+        if floor != self.current and on_level and speed < 0.05:
+            if self.candidate != floor:
+                self.candidate, self.candidate_since = floor, now
+            elif now - self.candidate_since > 1.0:
+                q = self.gt.pose.pose.orientation
+                yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+                self.switch(floor, (p.x, p.y, yaw), "自动识别")
+        else:
+            self.candidate = None
+
+    def switch(self, floor, pose, reason):
+        if not self.load_cli.service_is_ready():
+            self.get_logger().warn("map_server 还没就绪，稍后再试")
+            return
+        self.switching = True
+        url = os.path.join(self.maps_dir, self.floors[floor]["map"])
+        self.get_logger().info(f"[{reason}] 切换到 {floor} 楼，加载地图 {url}")
+        fut = self.load_cli.call_async(LoadMap.Request(map_url=url))
+        fut.add_done_callback(lambda f: self.after_load(f, floor, pose))
+
+    def after_load(self, fut, floor, pose):
+        res = fut.result()
+        if res is None or res.result != LoadMap.Response.RESULT_SUCCESS:
+            self.get_logger().error("加载地图失败")
+            self.switching = False
+            return
+        # 等新地图传到 AMCL 再设初始位姿
+        self.pending_pose = (floor, pose)
+        self.pose_timer = self.create_timer(1.0, self.send_pose)
+
+    def send_pose(self):
+        self.pose_timer.cancel()
+        floor, (x, y, yaw) = self.pending_pose
+        msg = PoseWithCovarianceStamped()
+        msg.header.frame_id = "map"
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.pose.pose.position.x = float(x)
+        msg.pose.pose.position.y = float(y)
+        msg.pose.pose.orientation.z = math.sin(yaw / 2)
+        msg.pose.pose.orientation.w = math.cos(yaw / 2)
+        cov = [0.0] * 36
+        cov[0] = cov[7] = 0.25 * 0.25
+        cov[35] = 0.15 * 0.15
+        msg.pose.covariance = cov
+        self.pub_pose.publish(msg)
+        self.current = floor
+        self.publish_floor()
+        self.switching = False
+        self.candidate = None
+        self.get_logger().info(f"已切到 {floor} 楼，初始位姿 ({x:.2f}, {y:.2f}, {math.degrees(yaw):.0f}°)")
+
+
+def main():
+    rclpy.init()
+    node = FloorManager()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    node.destroy_node()
+    rclpy.try_shutdown()
+
+
+if __name__ == "__main__":
+    main()

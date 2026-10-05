@@ -1,0 +1,171 @@
+#!/usr/bin/env python3
+"""导航到任意楼层的目标点（只有 Go2 能爬楼梯）。
+
+    ros2 run robot_nav_sim go_to --floor 2 --x 3.0 --y 2.0 [--yaw 0]
+
+同层：直接交给 Nav2。
+跨层：Nav2 导航到本层楼梯口 -> 用 IMU 俯仰角判断上/下楼梯过程、
+     用里程计航向保持直线 -> 走完后请求切换楼层地图 -> Nav2 导航到目标。
+"""
+import argparse
+import math
+import os
+import sys
+import time
+
+import rclpy
+import yaml
+from ament_index_python.packages import get_package_share_directory
+from geometry_msgs.msg import PoseStamped, Twist
+from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
+from nav_msgs.msg import Odometry
+from rclpy.qos import DurabilityPolicy, QoSProfile
+from sensor_msgs.msg import Imu
+from std_msgs.msg import Int32
+
+
+def yaw_of(q):
+    return math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+
+
+def pitch_of(q):
+    s = max(-1.0, min(1.0, 2 * (q.w * q.y - q.z * q.x)))
+    return math.asin(s)
+
+
+def wrap(a):
+    return math.atan2(math.sin(a), math.cos(a))
+
+
+class Runner:
+    def __init__(self, nav):
+        self.nav = nav
+        self.floor = None
+        self.imu = None
+        self.odom = None
+        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        nav.create_subscription(Int32, "/current_floor", self.on_floor, latched)
+        nav.create_subscription(Imu, "/livox/imu", lambda m: setattr(self, "imu", m), 10)
+        nav.create_subscription(Odometry, "/odom", lambda m: setattr(self, "odom", m), 10)
+        self.pub_cmd = nav.create_publisher(Twist, "/cmd_vel", 10)
+        self.pub_req = nav.create_publisher(Int32, "/floor_request", 10)
+
+    def on_floor(self, msg):
+        self.floor = msg.data
+
+    def spin(self, sec):
+        end = time.time() + sec
+        while time.time() < end:
+            rclpy.spin_once(self.nav, timeout_sec=0.02)
+
+    def pose(self, x, y, yaw):
+        p = PoseStamped()
+        p.header.frame_id = "map"
+        p.header.stamp = self.nav.get_clock().now().to_msg()
+        p.pose.position.x = float(x)
+        p.pose.position.y = float(y)
+        p.pose.orientation.z = math.sin(yaw / 2)
+        p.pose.orientation.w = math.cos(yaw / 2)
+        return p
+
+    def navigate(self, x, y, yaw, label):
+        print(f"[导航] {label}：({x:.2f}, {y:.2f}, {math.degrees(yaw):.0f}°)")
+        self.nav.goToPose(self.pose(x, y, yaw))
+        while not self.nav.isTaskComplete():
+            rclpy.spin_once(self.nav, timeout_sec=0.1)
+        res = self.nav.getResult()
+        if res != TaskResult.SUCCEEDED:
+            print(f"[导航] 失败：{res}")
+            return False
+        return True
+
+    def climb(self, speed=0.35):
+        """直行通过楼梯：先等俯仰角变大（上了楼梯），再等它回到水平，然后再走 0.7 m。"""
+        while self.imu is None or self.odom is None:
+            self.spin(0.1)
+        yaw0 = yaw_of(self.odom.pose.pose.orientation)
+        phase, t0, start_xy = 0, time.time(), None
+        print("[楼梯] 开始")
+        while True:
+            rclpy.spin_once(self.nav, timeout_sec=0.02)
+            pitch = abs(pitch_of(self.imu.orientation))
+            o = self.odom.pose.pose
+            elapsed = time.time() - t0
+            if phase == 0 and pitch > 0.25:
+                phase = 1
+                print(f"[楼梯] 进入楼梯段（俯仰 {math.degrees(pitch):.0f}°）")
+            elif phase == 1 and pitch < 0.05:
+                phase, start_xy = 2, (o.position.x, o.position.y)
+                print("[楼梯] 回到水平面")
+            elif phase == 2 and math.hypot(o.position.x - start_xy[0], o.position.y - start_xy[1]) > 0.7:
+                break
+            if (phase == 0 and elapsed > 10.0) or elapsed > 60.0:
+                self.pub_cmd.publish(Twist())
+                print("[楼梯] 超时，停止。请检查机器人是否对准了楼梯口")
+                return False
+            cmd = Twist()
+            cmd.linear.x = speed
+            cmd.angular.z = max(-0.5, min(0.5, -2.0 * wrap(yaw_of(o.orientation) - yaw0)))
+            self.pub_cmd.publish(cmd)
+        for _ in range(5):
+            self.pub_cmd.publish(Twist())
+            self.spin(0.05)
+        print("[楼梯] 完成")
+        return True
+
+    def change_floor(self, target):
+        self.pub_req.publish(Int32(data=target))
+        t0 = time.time()
+        while self.floor != target and time.time() - t0 < 15.0:
+            self.spin(0.1)
+        if self.floor != target:
+            print("[楼层] 切换超时（floor_manager 是否在运行？）")
+            return False
+        self.spin(2.0)   # 给 AMCL 一点时间收敛
+        return True
+
+
+def main():
+    ap = argparse.ArgumentParser(description="导航到指定楼层的目标点")
+    ap.add_argument("--floor", type=int, required=True)
+    ap.add_argument("--x", type=float, required=True)
+    ap.add_argument("--y", type=float, required=True)
+    ap.add_argument("--yaw", type=float, default=0.0, help="弧度")
+    args = ap.parse_args(rclpy.utilities.remove_ros_args(sys.argv)[1:])
+
+    floors_file = os.path.join(get_package_share_directory("robot_nav_sim"), "config", "floors.yaml")
+    with open(floors_file) as f:
+        floors = {int(k): v for k, v in yaml.safe_load(f)["floors"].items()}
+    if args.floor not in floors:
+        sys.exit(f"没有 {args.floor} 楼，可选：{sorted(floors)}")
+
+    rclpy.init()
+    nav = BasicNavigator()
+    run = Runner(nav)
+    # 注意不要用 localizer="amcl"：Humble 的 BasicNavigator 在收不到 /amcl_pose 时
+    # 会自己发一个 (0,0) 的初始位姿，把 AMCL 重置到原点。初始位姿由 AMCL 参数 / 楼层管理负责。
+    nav.waitUntilNav2Active(localizer="map_server")
+    t0 = time.time()
+    while run.floor is None and time.time() - t0 < 3.0:
+        run.spin(0.1)
+    current = run.floor if run.floor is not None else 1
+
+    ok = True
+    while ok and current != args.floor:
+        step = 1 if args.floor > current else -1
+        e = floors[current]["stair_entry"]
+        ok = run.navigate(e["x"], e["y"], e["yaw"], f"{current} 楼楼梯口")
+        ok = ok and run.climb()
+        ok = ok and run.change_floor(current + step)
+        if ok:
+            current += step
+    if ok:
+        ok = run.navigate(args.x, args.y, args.yaw, f"{args.floor} 楼目标")
+    print("完成" if ok else "未完成")
+    nav.destroy_node()
+    rclpy.try_shutdown()
+    sys.exit(0 if ok else 1)
+
+
+if __name__ == "__main__":
+    main()

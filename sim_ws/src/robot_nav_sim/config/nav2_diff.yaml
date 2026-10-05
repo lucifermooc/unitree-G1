@@ -1,0 +1,9 @@
+# 差速车：0.50 x 0.38 车身，轮子略宽于车身（DWB + NavFn）
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      footprint: "[[0.27, 0.25], [0.27, -0.25], [-0.27, -0.25], [-0.27, 0.25]]"
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      footprint: "[[0.27, 0.25], [0.27, -0.25], [-0.27, -0.25], [-0.27, 0.25]]"

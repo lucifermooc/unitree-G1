@@ -1,0 +1,151 @@
+<?xml version="1.0"?>
+<!--
+  Go2 机器狗（导航/建图用）：外观是 Unitree Go2 的站立姿态，运动由隐藏的差速轮实现。
+  原因：练 Nav2 / SLAM 关心的是传感器、TF、里程计和 cmd_vel，腿部动力学会让仿真变脆弱，
+  尤其是爬楼梯。CMU 的 autonomy_stack_go2 仿真也是同样思路（运动学模型）。
+  楼梯在场景里的碰撞体是一段光滑斜坡，隐藏轮子可以爬上去；雷达看到的仍然是台阶。
+-->
+<robot name="go2" xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <xacro:include filename="$(find robot_nav_sim)/urdf/common.xacro"/>
+  <xacro:arg name="use_meshes" default="true"/>
+  <xacro:property name="use_meshes" value="$(arg use_meshes)"/>
+  <xacro:property name="mesh_dir" value="file://$(find robot_nav_sim)/meshes/go2"/>
+
+  <!-- 站立姿态：大腿 0.8 rad，小腿 -1.5 rad，机身离地约 0.334 m -->
+  <xacro:property name="body_h" value="0.334"/>
+  <xacro:property name="thigh_angle" value="0.8"/>
+  <xacro:property name="calf_angle" value="-1.5"/>
+  <xacro:property name="wheel_r" value="0.08"/>
+  <xacro:property name="wheel_sep" value="0.36"/>
+
+  <material name="body_grey"><color rgba="0.82 0.83 0.85 1"/></material>
+  <material name="leg_dark"><color rgba="0.20 0.21 0.23 1"/></material>
+
+  <link name="base_footprint"/>
+  <joint name="base_joint" type="fixed">
+    <parent link="base_footprint"/>
+    <child link="base_link"/>
+    <origin xyz="0 0 ${body_h}" rpy="0 0 0"/>
+  </joint>
+
+  <link name="base_link">
+    <inertial>
+      <!-- 质心故意放低到离地约 0.13 m：隐藏底盘轴距短（为了能原地转），
+           真实高度的质心在 25° 楼梯上会向后翻 -->
+      <origin xyz="0 0 -0.20"/>
+      <mass value="15.0"/>
+      <inertia ixx="0.08" ixy="0" ixz="0" iyy="0.25" iyz="0" izz="0.28"/>
+    </inertial>
+    <visual>
+      <xacro:if value="${use_meshes}">
+        <geometry><mesh filename="${mesh_dir}/base.dae"/></geometry>
+      </xacro:if>
+      <xacro:unless value="${use_meshes}">
+        <geometry><box size="0.38 0.19 0.11"/></geometry>
+        <material name="body_grey"/>
+      </xacro:unless>
+    </visual>
+    <collision>
+      <geometry><box size="0.42 0.20 0.12"/></geometry>
+    </collision>
+  </link>
+
+  <!-- 一条腿：全部是 fixed 关节，只做外观（不参与碰撞） -->
+  <xacro:macro name="leg" params="name fx ly hip_rpy thigh_mesh calf_mesh">
+    <joint name="${name}_hip_joint" type="fixed">
+      <parent link="base_link"/>
+      <child link="${name}_hip"/>
+      <origin xyz="${fx * 0.1934} ${ly * 0.0465} 0" rpy="0 0 0"/>
+    </joint>
+    <link name="${name}_hip">
+      <visual>
+        <xacro:if value="${use_meshes}">
+          <origin xyz="0 0 0" rpy="${hip_rpy}"/>
+          <geometry><mesh filename="${mesh_dir}/hip.dae"/></geometry>
+        </xacro:if>
+        <xacro:unless value="${use_meshes}">
+          <origin xyz="0 ${ly * 0.05} 0" rpy="1.5708 0 0"/>
+          <geometry><cylinder radius="0.045" length="0.08"/></geometry>
+          <material name="leg_dark"/>
+        </xacro:unless>
+      </visual>
+    </link>
+    <joint name="${name}_thigh_joint" type="fixed">
+      <parent link="${name}_hip"/>
+      <child link="${name}_thigh"/>
+      <origin xyz="0 ${ly * 0.0955} 0" rpy="0 ${thigh_angle} 0"/>
+    </joint>
+    <link name="${name}_thigh">
+      <visual>
+        <xacro:if value="${use_meshes}">
+          <geometry><mesh filename="${mesh_dir}/${thigh_mesh}.dae"/></geometry>
+        </xacro:if>
+        <xacro:unless value="${use_meshes}">
+          <origin xyz="0 0 -0.1065" rpy="0 0 0"/>
+          <geometry><box size="0.035 0.03 0.213"/></geometry>
+          <material name="body_grey"/>
+        </xacro:unless>
+      </visual>
+    </link>
+    <joint name="${name}_calf_joint" type="fixed">
+      <parent link="${name}_thigh"/>
+      <child link="${name}_calf"/>
+      <origin xyz="0 0 -0.213" rpy="0 ${calf_angle} 0"/>
+    </joint>
+    <link name="${name}_calf">
+      <visual>
+        <xacro:if value="${use_meshes}">
+          <geometry><mesh filename="${mesh_dir}/${calf_mesh}.dae"/></geometry>
+        </xacro:if>
+        <xacro:unless value="${use_meshes}">
+          <origin xyz="0 0 -0.1065" rpy="0 0 0"/>
+          <geometry><box size="0.025 0.022 0.213"/></geometry>
+          <material name="leg_dark"/>
+        </xacro:unless>
+      </visual>
+    </link>
+    <joint name="${name}_foot_joint" type="fixed">
+      <parent link="${name}_calf"/>
+      <child link="${name}_foot"/>
+      <origin xyz="0 0 -0.213" rpy="0 0 0"/>
+    </joint>
+    <link name="${name}_foot">
+      <visual>
+        <xacro:if value="${use_meshes}">
+          <geometry><mesh filename="${mesh_dir}/foot.dae"/></geometry>
+        </xacro:if>
+        <xacro:unless value="${use_meshes}">
+          <geometry><sphere radius="0.022"/></geometry>
+          <material name="leg_dark"/>
+        </xacro:unless>
+      </visual>
+    </link>
+  </xacro:macro>
+
+  <xacro:leg name="FL" fx="1"  ly="1"  hip_rpy="0 0 0"           thigh_mesh="thigh"        calf_mesh="calf"/>
+  <xacro:leg name="FR" fx="1"  ly="-1" hip_rpy="3.1415 0 0"      thigh_mesh="thigh_mirror" calf_mesh="calf_mirror"/>
+  <xacro:leg name="RL" fx="-1" ly="1"  hip_rpy="0 3.1415 0"      thigh_mesh="thigh"        calf_mesh="calf"/>
+  <xacro:leg name="RR" fx="-1" ly="-1" hip_rpy="3.1415 3.1415 0" thigh_mesh="thigh_mirror" calf_mesh="calf_mirror"/>
+
+  <!-- 隐藏的四个驱动轮（只有碰撞体），滑移转向。
+       不用"中间两轮 + 前后万向球"：那种底盘在坡脚会被前球顶起、驱动轮悬空，然后打转翻车。
+       轮距（0.36）要比轴距（0.24）宽、摩擦系数不能太大（0.8），否则横向摩擦会把原地转向锁死；
+       0.8 仍远大于爬 25° 坡需要的 tan(25°)≈0.47。 -->
+  <xacro:property name="wheel_x" value="0.12"/>
+  <xacro:drive_wheel name="front_left_wheel"  parent="base_link" xyz="${wheel_x} ${wheel_sep / 2} ${wheel_r - body_h}"
+                     radius="${wheel_r}" width="0.04" visible="false" mu="0.8"/>
+  <xacro:drive_wheel name="front_right_wheel" parent="base_link" xyz="${wheel_x} ${-wheel_sep / 2} ${wheel_r - body_h}"
+                     radius="${wheel_r}" width="0.04" visible="false" mu="0.8"/>
+  <xacro:drive_wheel name="rear_left_wheel"   parent="base_link" xyz="${-wheel_x} ${wheel_sep / 2} ${wheel_r - body_h}"
+                     radius="${wheel_r}" width="0.04" visible="false" mu="0.8"/>
+  <xacro:drive_wheel name="rear_right_wheel"  parent="base_link" xyz="${-wheel_x} ${-wheel_sep / 2} ${wheel_r - body_h}"
+                     radius="${wheel_r}" width="0.04" visible="false" mu="0.8"/>
+
+  <!-- Mid-360 装在机身前上方 -->
+  <xacro:mid360 parent="base_link" xyz="0.19 0 0.105"/>
+
+  <!-- 滑移转向的等效轮距：原地转时轮子打滑，实际转得比运动学少（实测约 0.73 倍），
+       所以插件里的轮距按 0.36 / 0.73 ≈ 0.49 标定，让 cmd_vel 和里程计的角速度都对得上 -->
+  <xacro:skid_drive_plugin separation="0.49" radius="${wheel_r}" max_v="1.0" max_w="2.0"/>
+  <xacro:common_plugins/>
+</robot>

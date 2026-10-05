@@ -1,0 +1,16 @@
+# 由 tools/gen_world.py 生成。楼层 1 在下，楼层 2 在上。
+# entry：上/下楼梯前要导航到的位置（朝向楼梯）；landing：走完楼梯后停下的位置。
+floors:
+  1:
+    height: 0.0
+    map: floor1.yaml
+    stair_entry: {x: 6.9, y: 9.15, yaw: 0.0}
+    stair_landing: {x: 6.9, y: 9.15, yaw: 3.1416}
+  2:
+    height: 2.6
+    map: floor2.yaml
+    stair_entry: {x: 14.6, y: 9.15, yaw: 3.1416}
+    stair_landing: {x: 14.4, y: 9.15, yaw: 0.0}
+stair:
+  slope_deg: 24.9
+  length_m: 6.17

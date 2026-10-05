@@ -1,0 +1,9 @@
+# Go2：外形按站立姿态算（含腿和头），差速运动（DWB + NavFn）
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      footprint: "[[0.36, 0.17], [0.36, -0.17], [-0.30, -0.17], [-0.30, 0.17]]"
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      footprint: "[[0.36, 0.17], [0.36, -0.17], [-0.30, -0.17], [-0.30, 0.17]]"
