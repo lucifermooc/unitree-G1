@@ -24,7 +24,7 @@ cd sim_ws
 1. **修 ROS apt 源**：2025 年 ROS 更换了签名密钥，旧机器 `apt update` 会报 `NO_PUBKEY`。脚本改用官方的 `ros2-apt-source`，旧的源文件会备份成 `.bak`。
 2. 添加 OSRF 源，安装 **Gazebo Harmonic** 和 Harmonic 版的 `ros_gz`（`ros-humble-ros-gzharmonic`）。
    Humble 官方搭配的是 Fortress，两套 `ros_gz` 互相冲突，**脚本会卸载 Fortress 版的 `ros-humble-ros-gz*`**。
-3. 安装 Nav2、slam_toolbox、pointcloud_to_laserscan、xacro、teleop 等。
+3. 安装 Nav2（含 MPPI、STVL 插件）、slam_toolbox、pointcloud_to_laserscan、xacro、teleop 等。
 4. 从 [unitree_ros](https://github.com/unitreerobotics/unitree_ros)（BSD-3）下载 Go2 网格，约 25 MB。下载失败时会改用简化外观，不影响使用。
 5. `colcon build`。
 
@@ -83,6 +83,65 @@ ros2 run robot_nav_sim go_to --floor 1 --x 3.0 --y 4.2
 
 改场景只改 `src/robot_nav_sim/tools/gen_world.py`，然后运行 `python3 tools/gen_world.py`，世界文件、地图、楼层配置会一起更新。
 
+## 接你自己的 Lightning-LM + Nav2（推荐）
+
+上面的 AMCL / slam_toolbox 是本包自带的"独立模式"，不依赖任何外部代码，拿到就能跑。
+如果你的 `lightning_ws`（Lightning-LM + aid_navigation2）已经调好，用 `lightning.launch.py`：
+**仿真只顶替传感器驱动**，建图、定位、导航全部用你自己的代码和参数。
+
+```
+Gazebo ──/livox/points──> livox_bridge ──/livox/lidar (Livox CustomMsg)──┐
+       ──/livox/imu ─────────────────────────────────────────────────────┤
+       ──/odom（不发 TF）──> LocGuard / Nav2                              ├─> 你的 Lightning-LM（g1_online.launch.py）
+       ──/clock                                                          │      map -> base_link -> body_link
+                                                                         │      /lightning/registered_scan
+你的 scan_range_filter <─────────────────────────────────────────────────┘
+       ──/lightning/registered_scan_nav──> 你的 Nav2（navigation2.launch.py + nav2_params.yaml，MPPI）──/cmd_vel──> Gazebo
+```
+
+前提：本机 `lightning_ws` 已经编译好（含 `lightning`、`livox_ros_driver2`、`aid_navigation2`、`aid_costmap_plugin`、
+`g1_nav_bridge`）。你的 Nav2 要用的 MPPI 和 STVL（`mid360_voxel_layer`）插件 `install.sh` 已经装好。
+
+每个终端先 source 你的工作空间，再 source sim_ws（顺序不能反，`livox_bridge` 要用你的 `livox_ros_driver2` 消息）：
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/lightning_ws/install/setup.bash
+source ~/sim_ws/install/setup.bash
+```
+
+```bash
+# 1. 建图：Lightning run_slam_online，遥控走一圈
+ros2 launch robot_nav_sim lightning.launch.py mode:=mapping robot:=go2 world:=flat
+ros2 run teleop_twist_keyboard teleop_twist_keyboard
+ros2 service call /lightning/save_map lightning/srv/SaveMap "{map_id: sim_go2_flat}"   # 存到 ~/maps/sim_go2_flat
+
+# 2. 定位 + 导航：Lightning run_loc_online + 你的 Nav2，RViz 里点 "2D Goal Pose"
+ros2 launch robot_nav_sim lightning.launch.py mode:=navigation robot:=go2 world:=flat
+#    地图目录默认 ~/maps/sim_<robot>_<world>，也可以 map_dir:=~/maps/xxx
+
+# 只要定位不要导航
+ros2 launch robot_nav_sim lightning.launch.py mode:=localization robot:=go2 world:=flat
+```
+
+**你的文件一个都没改**。仿真需要的差异都是 launch 时生成临时文件来覆盖：
+
+| 项目 | 真机 | 仿真里怎么处理 |
+|---|---|---|
+| 雷达驱动 | `livox_ros_driver2` | 不启动（`start_livox:=false`），`livox_bridge` 把仿真点云转成同样的 CustomMsg 发到 `/livox/lidar` |
+| URDF | G1 的 URDF | 仿真机器人 URDF，根改名为 `body_link`，雷达是 `mid360_link`，交给你的 `g1_online.launch.py` 启动 robot_state_publisher |
+| Lightning 配置 | `default_livox.yaml` | 读你的 `default_livox.yaml`，只把 `extrinsic_T/R` 改成零/单位阵（真机驱动做过 Rx(π) 翻转，仿真没有）；`floor_height` 按雷达离地高度给 |
+| 仿真时钟 | — | Lightning 可执行文件用 gflags 解析参数，不能带 `--ros-args`，所以节点起来后用 `ros2 param set /lightning_slam use_sim_time true` 打开 |
+| 机器人外形 | G1：`robot_radius 0.50`（为覆盖 D435 盲区放大） | Go2 0.33 m、差速车 0.32 m，`inflation_radius` 按你的规则 = 半径 + 0.20，MPPI `ObstaclesCritic.inflation_radius` 同步；阿克曼车用多边形足迹。`robot_radius:=0.50` 可还原 G1 的值（1.2 m 门洞会过不去） |
+| Nav2 参数 | `nav2_params.yaml`（Jazzy 写法） | 读你的文件，生成仿真版：删掉 D435 的 `stvl_voxel_layer` 和 `keepout_layer`（和你 launch 里 `use_realsense_obstacles:=false use_keepout:=false` 一样），全部 `use_sim_time: true`，插件名 `::` 改成 Humble 的 `/`，补上 Humble 的单数 `progress_checker_plugin` |
+| 阿克曼车 | — | MPPI 的 `motion_model` 换成 `Ackermann`，最小转弯半径 0.85 m |
+
+注意：
+
+- **出生点必须和建图时一样**。Lightning 定位从建图起点开始，换了出生点要在 RViz 里用 "2D Pose Estimate" 发 `/initialpose`（你的 LocSystem 支持）。
+- Lightning 出的 2D 栅格（g2p5）是把所有高度压到一张图上的，**two_floor 场景两层会叠在一起**，所以 Lightning 模式下 2D 导航先在 `flat` 场景用；跨楼层还是用上面的独立模式。3D 点云地图本身是完整的两层。
+- 你的 `nav2_params.yaml` 是按 G1 调的（`robot_radius 0.50`、MPPI 速度上限等）。Go2 / 小车比 G1 小，窄处可能过不去，这是参数问题，不是仿真问题。
+
 ## 话题和坐标系
 
 | 话题 | 类型 | 说明 |
@@ -122,6 +181,8 @@ TF：`map →(AMCL / slam_toolbox) odom →(轮式里程计) base_footprint → 
 | Nav2 一楼导航 | Go2、差速车、阿克曼车都到达 (13, 7)，用时 21~24 秒；定位误差 0.12~0.23 m |
 | 跨楼层 | 1 楼 → 2 楼 (3, 2) 成功，到点定位误差 0.12 m；2 楼 → 1 楼成功，误差 0.08 m |
 | 建图 | slam_toolbox 在平面场景建图，`map_saver_cli` 保存成功 |
+| Lightning 建图 | Go2 在 flat 场景按 9 个航点绕一圈（约 60 m），`run_slam_online` 全程正常，`/lightning/save_map` 保存成功，2D 栅格和场景一致；回到起点时和真值差 0.07~0.09 m |
+| Lightning 定位 + 你的 Nav2 | `run_loc_online` + MPPI + SmacPlanner2D + 你的行为树，Go2 从 (3, 4.2) 穿过 1.2 m 门洞到 (13, 7)，28 秒到达；按时间戳对齐后定位误差 0.01~0.15 m（含建图本身的漂移） |
 
 ## 已知限制
 
@@ -131,6 +192,5 @@ TF：`map →(AMCL / slam_toolbox) odom →(轮式里程计) base_footprint → 
 
 ## 下一步可以做的
 
-- 用 `/livox/points` 和 `/livox/imu` 跑 3D 激光 SLAM（Lightning-LM、FAST-LIO），做一张跨两层的 3D 地图。
-- 用 3D 定位结果替代楼层管理里的仿真真值。
+- Lightning 模式下按楼层切 2D 栅格（按 z 分段生成 g2p5），把跨楼层导航也换成 Lightning 定位。
 - 在 `gen_world.py` 里加动态障碍、斜坡、窄通道，测试 Nav2 的参数。
