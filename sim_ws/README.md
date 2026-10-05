@@ -138,6 +138,7 @@ ros2 launch robot_nav_sim lightning.launch.py mode:=localization robot:=go2 worl
 
 注意：
 
+- 阿克曼车不能原地转，建图时用键盘遥控走大弧线；也可以像测试里那样直接用差速车的地图，把出生点挪到雷达和建图起点重合的位置。
 - **出生点必须和建图时一样**。Lightning 定位从建图起点开始，换了出生点要在 RViz 里用 "2D Pose Estimate" 发 `/initialpose`（你的 LocSystem 支持）。
 - Lightning 出的 2D 栅格（g2p5）是把所有高度压到一张图上的，**two_floor 场景两层会叠在一起**，所以 Lightning 模式下 2D 导航先在 `flat` 场景用；跨楼层还是用上面的独立模式。3D 点云地图本身是完整的两层。
 - 你的 `nav2_params.yaml` 是按 G1 调的（`robot_radius 0.50`、MPPI 速度上限等）。Go2 / 小车比 G1 小，窄处可能过不去，这是参数问题，不是仿真问题。
@@ -182,7 +183,8 @@ TF：`map →(AMCL / slam_toolbox) odom →(轮式里程计) base_footprint → 
 | 跨楼层 | 1 楼 → 2 楼 (3, 2) 成功，到点定位误差 0.12 m；2 楼 → 1 楼成功，误差 0.08 m |
 | 建图 | slam_toolbox 在平面场景建图，`map_saver_cli` 保存成功 |
 | Lightning 建图 | Go2 在 flat 场景按 9 个航点绕一圈（约 60 m），`run_slam_online` 全程正常，`/lightning/save_map` 保存成功，2D 栅格和场景一致；回到起点时和真值差 0.07~0.09 m |
-| Lightning 定位 + 你的 Nav2 | `run_loc_online` + MPPI + SmacPlanner2D + 你的行为树，Go2 从 (3, 4.2) 穿过 1.2 m 门洞到 (13, 7)，28 秒到达；按时间戳对齐后定位误差 0.01~0.15 m（含建图本身的漂移） |
+| Lightning 定位 + 你的 Nav2 | `run_loc_online` + MPPI + SmacPlanner2D + 你的行为树。Go2、差速车各自建图后，从 (3, 4.2) 穿过 1.2 m 门洞到 (13, 7)，都是 28 秒到达；按时间戳对齐后定位误差 0.01~0.15 m（含建图本身的漂移） |
+| 阿克曼车 | 复用差速车的地图（出生点 `x:=2.55`，让雷达和建图起点重合），MPPI 阿克曼模型到达 (10.5, 3.0)，用时 25.5 秒，误差 1~2 cm |
 
 ## 已知限制
 
