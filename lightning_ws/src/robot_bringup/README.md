@@ -8,7 +8,8 @@
 ## 开机自启（Thor）
 
 开机后自动启动整套栈和语义地图，不再手动执行 `ros2 launch robot_bringup robot.launch.py`。
-由两个 systemd 服务负责，以 `unitree` 用户身份运行：
+由两个 systemd 服务负责，以 `unitree` 用户身份运行。unit 文件就是 `system/g1-robot.service`、`system/g1-semantic-map.service`，
+`g1_service.sh install` 把它们拷到 `/etc/systemd/system/`；ExecStart 调 `g1_autostart.sh`（source ROS/install/DDS 环境、等网卡、写日志）：
 
 | 服务 | 执行 | 等同于手动 |
 |---|---|---|
@@ -23,8 +24,12 @@ DDS 设置：spdp 组播只用于发现，数据走单播，参与者上限为 1
 
 如果已经有一套栈在运行（例如手动用 nohup 起的），服务会拒绝启动，避免出现两套同名进程。
 
+服务和下面的命令都只用 `install/` 里的文件：部署后 src 会删除，unit 里不能出现 src 路径。
+旧版 install 写的 unit 指向 `src/robot_bringup/script/g1_autostart.sh`，删 src 后开机自启失败；
+`restart`/`start`/`status` 遇到这种 unit 会告警，重新执行一次 `install` 即可。
+
 ```bash
-S=/opt/G1/lighting_ws/src/robot_bringup/script
+S=/opt/G1/lighting_ws/install/robot_bringup/share/robot_bringup/script
 $S/g1_service.sh install    # 只需一次（需要 sudo 密码）：安装两个服务并设为开机自启，同时安装 system/60-dds-buffers.conf
                             # 和 /etc/sudoers.d/g1-autostart（只放行启停这两个服务免密，之后 restart/stop/start 不再要密码）
 $S/g1_service.sh restart    # 部署后重启：停服务并清理所有残留 ROS 进程（等同 stop_all），然后启动服务

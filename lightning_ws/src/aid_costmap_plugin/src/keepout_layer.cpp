@@ -237,6 +237,10 @@ KeepoutLayer::updateCosts(
     return;
   }
 
+  // 必须与 maskCallback() 持同一把锁：回调里会 reset/重建 mask_costmap_，不加锁时这里遍历到一半掩码被释放
+  // → 段错误。2026-10-03 切巡逻模式时禁行区节点重发掩码，planner_server（全局代价地图遍历整张图）因此崩溃（exit -11）。
+  std::lock_guard<nav2_costmap_2d::Costmap2D::mutex_t> guard(*getMutex());
+
   if (!mask_costmap_) {
     // Show warning message every 2 seconds to not litter an output
     static auto clock = rclcpp::Clock(RCL_ROS_TIME);

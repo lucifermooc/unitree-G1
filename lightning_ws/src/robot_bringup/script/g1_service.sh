@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# 管理 Thor 开机自启（systemd 系统服务，以普通用户身份运行）：
-#   g1-robot.service         -> g1_autostart.sh robot     (robot.launch.py)
-#   g1-semantic-map.service  -> g1_autostart.sh semantic  (semantic_map.launch.py)
+# 管理 Thor 开机自启（systemd 系统服务，以普通用户身份运行）。unit 文件在 system/g1-robot.service、
+# system/g1-semantic-map.service，install 时拷到 /etc/systemd/system/；它们的 ExecStart 调 g1_autostart.sh
+# （负责 source ROS/install/dds_env.sh、等 DDS 网卡、写日志，systemd 自己做不了这些）。
 #
 # 用法（以 unitree 用户执行，需要时自动 sudo）：
 #   g1_service.sh install     安装并设为开机自启，同时装 DDS 内核缓冲 system/60-dds-buffers.conf，
@@ -13,6 +13,9 @@
 #   g1_service.sh log [robot|semantic]   跟踪最新日志（默认 robot）
 #   g1_service.sh uninstall   取消开机自启并删除服务
 #   g1_service.sh units       只打印将要安装的 unit 内容
+#
+# 部署后 src 会删除，所以执行 install 里的这份：
+#   bash /opt/G1/lighting_ws/install/robot_bringup/share/robot_bringup/script/g1_service.sh <命令>
 
 set -eo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,53 +23,19 @@ G1_WS="${G1_WS:-/opt/G1/lighting_ws}"
 RUN_USER="${G1_USER:-${SUDO_USER:-$(id -un)}}"
 UNITS=(g1-robot.service g1-semantic-map.service)
 UNIT_DIR=/etc/systemd/system
-SYSCTL_SRC="$G1_WS/src/robot_bringup/system/60-dds-buffers.conf"
+# 服务固定执行 install 里的入口，与本脚本从哪里执行无关：unit 里写 src 路径的话，删 src 后开机自启
+# 报 "g1_autostart.sh: No such file or directory"（2026-10-03 128.146）。
+G1_SHARE="$G1_WS/install/robot_bringup/share/robot_bringup"
+AUTOSTART="$G1_SHARE/script/g1_autostart.sh"
+SYSCTL_SRC="$G1_SHARE/system/60-dds-buffers.conf"
 LOG_DIR="${G1_LOG_DIR:-/opt/G1/logs}"
 
 as_root() { if [ "$(id -u)" -eq 0 ]; then "$@"; else sudo "$@"; fi; }
 as_user() { if [ "$(id -u)" -eq 0 ]; then sudo -u "$RUN_USER" "$@"; else "$@"; fi; }
 
-unit_robot() {
-  cat <<EOF
-[Unit]
-Description=G1 robot stack (ros2 launch robot_bringup robot.launch.py, DDS cyclonedds_g1.xml)
-Wants=network-online.target
-After=network-online.target
-
-[Service]
-Type=simple
-User=$RUN_USER
-ExecStart=/bin/bash $SCRIPT_DIR/g1_autostart.sh robot
-# 与终端里 Ctrl-C 相同：SIGINT 发给本服务的全部进程（含 launch_manager 拉起的定位/导航/建图），
-# 30 s 未退出的再 SIGKILL，不会留下孤儿进程。
-KillSignal=SIGINT
-TimeoutStopSec=30
-# 不自动重启：stop_all 手动停栈后服务不会自己再起一套，避免两套同名进程。
-Restart=no
-
-[Install]
-WantedBy=multi-user.target
-EOF
-}
-
-unit_semantic() {
-  cat <<EOF
-[Unit]
-Description=G1 semantic map (ros2 launch semantic_map_ros semantic_map.launch.py)
-Wants=network-online.target
-After=network-online.target docker.service g1-robot.service
-
-[Service]
-Type=simple
-User=$RUN_USER
-ExecStart=/bin/bash $SCRIPT_DIR/g1_autostart.sh semantic
-KillSignal=SIGINT
-TimeoutStopSec=20
-Restart=no
-
-[Install]
-WantedBy=multi-user.target
-EOF
+# unit 文件就是 system/g1-*.service（随包装进 install），这里只按实际用户/工作区替换后输出。
+unit_file() {
+  sed -e "s|^User=.*|User=$RUN_USER|" -e "s|/opt/G1/lighting_ws|$G1_WS|g" "$G1_SHARE/system/$1"
 }
 
 # 只放行启停这两个服务的 systemctl 命令免密（g1_service.sh start/stop/restart 与单独重启某一个），不开放整个 sudo。
@@ -86,11 +55,23 @@ cleanup_ros() {
   as_user python3 "$SCRIPT_DIR/stop_ros_processes.py" --workspace "$G1_WS"
 }
 
+# 旧版 install 写的 unit 指向 src；只告警不阻止（unit 要 sudo 重装）。
+check_units() {
+  local u unit
+  for u in "${UNITS[@]}"; do
+    unit="$(systemctl cat "$u" 2>/dev/null || true)"   # 不用管道接 grep -q：pipefail 下 SIGPIPE 会误报
+    [[ "$unit" == *"ExecStart=/bin/bash $AUTOSTART "* ]] \
+      || echo "WARN $u does not run $AUTOSTART (old unit pointing at src?); re-run: bash $G1_SHARE/script/g1_service.sh install" >&2
+  done
+}
+
 case "${1:-}" in
   install)
     [ "$RUN_USER" = root ] && { echo "run as the robot user (e.g. unitree), not root" >&2; exit 1; }
-    unit_robot | as_root tee "$UNIT_DIR/g1-robot.service" >/dev/null
-    unit_semantic | as_root tee "$UNIT_DIR/g1-semantic-map.service" >/dev/null
+    for f in "$AUTOSTART" "$G1_SHARE/system/dds_env.sh" "$SYSCTL_SRC" "${UNITS[@]/#/$G1_SHARE/system/}"; do
+      [ -f "$f" ] || { echo "missing $f: colcon build --packages-select robot_bringup first" >&2; exit 1; }
+    done
+    for u in "${UNITS[@]}"; do unit_file "$u" | as_root tee "$UNIT_DIR/$u" >/dev/null; done
     tmp="$(mktemp)"; sudoers_rule > "$tmp"
     # 写坏的 sudoers 会让 sudo 整个不可用：先 visudo 校验再装
     if as_root visudo -cf "$tmp" >/dev/null; then
@@ -116,6 +97,7 @@ case "${1:-}" in
     echo "removed ${UNITS[*]} (/etc/sysctl.d/60-dds-buffers.conf kept)"
     ;;
   start)
+    check_units
     as_root systemctl start "${UNITS[@]}"
     ;;
   stop)
@@ -123,6 +105,7 @@ case "${1:-}" in
     cleanup_ros
     ;;
   restart)
+    check_units
     as_root systemctl stop "${UNITS[@]}"
     cleanup_ros
     sleep 2
@@ -130,6 +113,7 @@ case "${1:-}" in
     systemctl --no-pager --lines=0 status "${UNITS[@]}" || true
     ;;
   status)
+    check_units
     systemctl --no-pager --lines=3 status "${UNITS[@]}" || true
     echo; ls -l "$LOG_DIR"/*_latest.log 2>/dev/null || echo "no logs in $LOG_DIR yet"
     ;;
@@ -137,8 +121,7 @@ case "${1:-}" in
     tail -n 100 -F "$LOG_DIR/${2:-robot}_latest.log"
     ;;
   units)
-    echo "# $UNIT_DIR/g1-robot.service"; unit_robot
-    echo; echo "# $UNIT_DIR/g1-semantic-map.service"; unit_semantic
+    for u in "${UNITS[@]}"; do echo "# $UNIT_DIR/$u"; unit_file "$u"; echo; done
     echo; echo "# /etc/sudoers.d/g1-autostart"; sudoers_rule
     ;;
   *)

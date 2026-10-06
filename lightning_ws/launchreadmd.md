@@ -34,7 +34,7 @@ ldd install/realsense2_camera/lib/librealsense2_camera.so | grep librealsense2
 Ubuntu 默认 UDP 接收缓冲只有 208 KB，装不下一帧 Livox 点云；不改的话建图时 IMU 会被内核丢掉，快转后地图出现多层墙。只需做一次：
 
 ```bash
-sudo cp /opt/G1/lighting_ws/src/robot_bringup/system/60-dds-buffers.conf /etc/sysctl.d/
+sudo cp /opt/G1/lighting_ws/install/robot_bringup/share/robot_bringup/system/60-dds-buffers.conf /etc/sysctl.d/
 sudo sysctl --system
 sysctl net.core.rmem_max   # 应为 33554432
 ```
