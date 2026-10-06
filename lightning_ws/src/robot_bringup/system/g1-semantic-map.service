@@ -1,0 +1,16 @@
+# 由 g1_service.sh install 拷到 /etc/systemd/system/（安装时按实际用户/工作区替换 User= 和 /opt/G1/lighting_ws）。
+[Unit]
+Description=G1 semantic map (ros2 launch semantic_map_ros semantic_map.launch.py)
+Wants=network-online.target
+After=network-online.target docker.service g1-robot.service
+
+[Service]
+Type=simple
+User=unitree
+ExecStart=/bin/bash /opt/G1/lighting_ws/install/robot_bringup/share/robot_bringup/script/g1_autostart.sh semantic
+KillSignal=SIGINT
+TimeoutStopSec=20
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

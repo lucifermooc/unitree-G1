@@ -82,8 +82,12 @@ install(TARGETS
 install(TARGETS robot_status_manager_node forbidden_map_create_node
 editor_map_node robot_pose_pub_node
 DESTINATION lib/${PROJECT_NAME})
-install(DIRECTORY launch param script maps
+# 开机自启和 g1_service.sh 只用 install 里的文件（部署后 src 会删除），所以 system/（dds_env.sh 等）也要装；
+# USE_SOURCE_PERMISSIONS 保留脚本的可执行位。
+install(DIRECTORY launch param script maps system
   DESTINATION share/${PROJECT_NAME}
+  USE_SOURCE_PERMISSIONS
+  PATTERN "__pycache__" EXCLUDE
 )
 install(FILES README.md
   DESTINATION share/${PROJECT_NAME}

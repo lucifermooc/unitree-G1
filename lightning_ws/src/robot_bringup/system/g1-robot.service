@@ -1,0 +1,20 @@
+# 由 g1_service.sh install 拷到 /etc/systemd/system/（安装时按实际用户/工作区替换 User= 和 /opt/G1/lighting_ws）。
+# 只引用 install/：部署后 src 会删除。g1_autostart.sh 负责 source ROS/install/dds_env.sh、等 DDS 网卡、写日志。
+[Unit]
+Description=G1 robot stack (ros2 launch robot_bringup robot.launch.py, DDS cyclonedds_g1.xml)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=unitree
+ExecStart=/bin/bash /opt/G1/lighting_ws/install/robot_bringup/share/robot_bringup/script/g1_autostart.sh robot
+# 与终端里 Ctrl-C 相同：SIGINT 发给本服务的全部进程（含 launch_manager 拉起的定位/导航/建图），
+# 30 s 未退出的再 SIGKILL，不会留下孤儿进程。
+KillSignal=SIGINT
+TimeoutStopSec=30
+# 不自动重启：stop_all 手动停栈后服务不会自己再起一套，避免两套同名进程。
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

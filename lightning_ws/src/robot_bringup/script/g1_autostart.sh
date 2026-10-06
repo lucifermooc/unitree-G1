@@ -3,6 +3,8 @@
 #   g1_autostart.sh robot      等同于在配好 DDS 的终端里 ros2 launch robot_bringup robot.launch.py
 #   g1_autostart.sh semantic   语义地图 semantic_map.launch.py（离线本地模型 + GPU）
 # 启动参数在同目录 g1_autostart.env；日志在 /opt/G1/logs/<robot|semantic>_*.log（*_latest.log 指向最新一份）。
+# systemd 执行的是 install/robot_bringup/share/robot_bringup/script 里这份：部署后 src 会删除，
+# 所以本脚本只能引用同一安装目录下的文件，不能写 $G1_WS/src/...
 
 WHAT="${1:-}"
 case "$WHAT" in
@@ -36,15 +38,20 @@ log "start $WHAT, user=$(id -un), ws=$G1_WS, local env: $([ -f "$G1_LOCAL_ENV" ]
 # ---------- ROS + 工作区 + DDS（顺序与 2026-09 实机验证过的手动启动一致） ----------
 # 不能只 source unitree_ros2/setup.sh：它把 CYCLONEDDS_URI 设成组播，同机点云会走网线（见 CLAUDE.md）。
 # dds_env.sh 先 source 它拿到 RMW，再把 CYCLONEDDS_URI 改成 system/cyclonedds_g1.xml（spdp + 参与者上限 100）。
+SYSTEM_DIR="$SCRIPT_DIR/../system"   # 与 script/ 同级，install 和 src 里都一样
+if [ ! -f "$SYSTEM_DIR/dds_env.sh" ]; then
+  log "ERROR $SYSTEM_DIR/dds_env.sh not found: rebuild robot_bringup (it installs system/)"
+  exit 1
+fi
 source /opt/ros/jazzy/setup.bash
 source "$G1_WS/install/setup.bash"
-source "$G1_WS/src/robot_bringup/system/dds_env.sh"
+source "$SYSTEM_DIR/dds_env.sh"
 export PYTHONUNBUFFERED=1   # 日志按行落盘
 export LANG="${LANG:-C.UTF-8}"
 log "RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-} ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-}"
 
 # CycloneDDS 绑定的网卡（连机器人本体/雷达的网段）没有 IP 时所有节点都会起不来：一直等到它就绪。
-DDS_XML="$G1_WS/src/robot_bringup/system/cyclonedds_g1.xml"
+DDS_XML="$SYSTEM_DIR/cyclonedds_g1.xml"
 IFACE="$(grep -o 'NetworkInterface name="[^"]*"' "$DDS_XML" | head -1 | cut -d'"' -f2)"
 if [ -n "$IFACE" ]; then
   waited=0
