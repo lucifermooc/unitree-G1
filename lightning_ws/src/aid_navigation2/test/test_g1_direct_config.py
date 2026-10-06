@@ -186,9 +186,35 @@ class G1ParamTests(unittest.TestCase):
         self.assertAlmostEqual(mark['observation_persistence'] * self.globl['update_frequency'], 1.0)
         self.assertTrue(self.local['rolling_window'])
 
+    def test_in_place_turn_and_2d_planner(self):
+        """2026-10-06：实测 G1 能原地转（遥控 8 次，激光位移 4~17 cm），cmdvel_to_sport 不再给转弯强加前进速度；
+        规划换回 SmacPlanner2D，RPP 起步/到点原地转到朝向，不再需要 Hybrid-A* 调头圈。"""
+        bridge = yaml.safe_load(
+            (SRC / 'g1_nav_bridge/config/nav_bridge.yaml').read_text())['g1_cmdvel_to_sport']['ros__parameters']
+        self.assertEqual(bridge['turn_min_vx'], 0.0)   # 非 0 时到点原地转会变成圆弧，横移 0.3~0.4 m
+        g = self.nav['planner_server']['ros__parameters']['GridBased']
+        self.assertEqual(g['plugin'], 'nav2_smac_planner::SmacPlanner2D')
+        f = self.nav['controller_server']['ros__parameters']['FollowPath']
+        self.assertEqual(f['plugin'], 'nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController')
+        self.assertTrue(f['use_rotate_to_heading'])
+        self.assertFalse(f['allow_reversing'])        # G1 倒走会摔
+        self.assertGreaterEqual(f['rotate_to_heading_angular_vel'], bridge['min_wz'])  # 再小会被桥接抬到 min_wz
+        # RPP 进 xy 容差就停下原地转、转进 yaw 容差就停：0.2 时实测提前 0.14~0.2 m 停、航向差 6~8°
+        gc = self.nav['controller_server']['ros__parameters']['goal_checker']
+        self.assertLessEqual(gc['xy_goal_tolerance'], 0.10)
+        self.assertLessEqual(gc['yaw_goal_tolerance'], 0.10)
+        self.assertTrue(gc['stateful'])   # 用户实测 false 到不了点
+        sm = self.nav['velocity_smoother']['ros__parameters']
+        self.assertLessEqual(f['desired_linear_vel'], sm['max_velocity'][0])
+        self.assertLessEqual(f['rotate_to_heading_angular_vel'], sm['max_velocity'][2])
+        # 停车减速要快：慢减速段会被 cmdvel_to_sport 抬回 min_vx / min_wz，到点后多转多走
+        for axis, minimum in ((0, bridge['min_vx']), (2, bridge['min_wz'])):
+            stop_time = minimum / abs(sm['max_decel'][axis])
+            self.assertLess(stop_time, 0.25, f'axis {axis}: 从最小有效速度降到 0 要 {stop_time:.2f}s')
+
     def test_jazzy_plugin_names(self):
         p = self.nav['planner_server']['ros__parameters']
-        self.assertEqual(p['GridBased']['plugin'], 'nav2_smac_planner::SmacPlanner2D')
+        self.assertTrue(p['GridBased']['plugin'].startswith('nav2_smac_planner::'), p['GridBased']['plugin'])
         b = self.nav['behavior_server']['ros__parameters']
         for key in b['behavior_plugins']:
             self.assertTrue(b[key]['plugin'].startswith('nav2_behaviors::'), b[key]['plugin'])
@@ -216,8 +242,8 @@ class G1ParamTests(unittest.TestCase):
         self.assertGreater(bridge['duration'], 0.0)
 
     def test_obstacle_critic_matches_local_inflation(self):
-        """ObstaclesCritic 复算代价，几何必须与 local_costmap 的 inflation 层一致。"""
-        f = self.nav['controller_server']['ros__parameters']['FollowPath']
+        """ObstaclesCritic 复算代价，几何必须与 local_costmap 的 inflation 层一致（保留的 MPPI 参数，回退时用）。"""
+        f = self.nav['controller_server']['ros__parameters']['FollowPathMPPI']
         oc = f['ObstaclesCritic']
         inf = self.local['inflation_layer']
         self.assertTrue(oc['enabled'])
@@ -230,17 +256,22 @@ class G1ParamTests(unittest.TestCase):
 
     def test_controller_envelope(self):
         p = self.nav['controller_server']['ros__parameters']
-        self.assertAlmostEqual(p['FollowPath']['model_dt'], 1. / p['controller_frequency'])
-        self.assertEqual(p['FollowPath']['vx_min'], 0.0)   # 不后退
-        self.assertEqual(p['FollowPath']['vx_max'], 0.45)
-        self.assertEqual(p['FollowPath']['wz_max'], 0.9)
+        m = p['FollowPathMPPI']   # 保留的 MPPI 参数（回退时改回 FollowPath）
+        self.assertAlmostEqual(m['model_dt'], 1. / p['controller_frequency'])
+        self.assertEqual(m['vx_min'], 0.0)   # 不后退
+        self.assertEqual(m['vx_max'], 0.45)
+        self.assertEqual(m['wz_max'], 0.9)
+        self.assertNotIn('FollowPathMPPI', p['controller_plugins'])
         b = self.nav['behavior_server']['ros__parameters']
         self.assertEqual((b['max_rotational_vel'], b['min_rotational_vel']), (0.9, 0.8))
 
     def test_never_reverse(self):
         """G1 收到负的前进速度会摔倒：三道防线都不得放宽。"""
-        f = self.nav['controller_server']['ros__parameters']['FollowPath']
-        self.assertEqual(f['vx_min'], 0.0)
+        c = self.nav['controller_server']['ros__parameters']
+        self.assertEqual(c['FollowPathMPPI']['vx_min'], 0.0)
+        f = c['FollowPath']
+        self.assertIn('RegulatedPurePursuit', f['plugin'])
+        self.assertFalse(f['allow_reversing'])
         s = self.nav['velocity_smoother']['ros__parameters']
         self.assertGreaterEqual(s['min_velocity'][0], 0.0)
         bt = (ROOT / 'behavior_trees' /

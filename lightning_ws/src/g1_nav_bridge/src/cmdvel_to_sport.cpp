@@ -26,8 +26,8 @@ class CmdVelToSport final : public rclcpp::Node {
     if (!std::isfinite(duration_) || duration_ <= 0.0) {
       throw std::invalid_argument("duration must be positive and finite");
     }
-    // G1 是双足人形，不能原地转向，且有最小有效速度：
-    //   直行 vx < 0.3 m/s 走不动；转弯时 |wz| < 0.6 rad/s 转不动，且 vx < 0.2 m/s 转不了弯。
+    // G1 有最小有效速度：直行 vx < 0.3 m/s 走不动；转弯时 |wz| < 0.6 rad/s 转不动。
+    // turn_min_vx：转弯时附加的最小前进速度。2026-10-06 实测 G1 能原地转，配置里改为 0（默认值保留旧行为）。
     // 导航输出的非零低速按方向提升到最小有效值；低于 *_stop 视为停止/不转。
     min_vx_ = declare_parameter<double>("min_vx", 0.3);
     min_wz_ = declare_parameter<double>("min_wz", 0.6);
@@ -119,7 +119,7 @@ class CmdVelToSport final : public rclcpp::Node {
   std::array<float, 3> ApplyMinimumVelocity(std::array<float, 3> velocity) const {
     const float wz = velocity[2];
     if (std::fabs(wz) >= wz_stop_) {
-      // 转弯：角速度提到最小有效值；不能原地转，必须带前进速度（显式后退则保持后退方向）。
+      // 转弯：角速度提到最小有效值；前进速度至少 turn_min_vx（为 0 时允许原地转；显式后退则保持后退方向）。
       velocity[2] = std::copysign(std::max(std::fabs(wz), static_cast<float>(min_wz_)), wz);
       const float vx = velocity[0];
       velocity[0] = vx <= -static_cast<float>(vx_stop_)

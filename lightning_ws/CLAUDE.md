@@ -43,8 +43,11 @@ Never spawn multiple subagents for routine debugging.
 - 部署真机前需用户同意；验证时不发导航目标、不发速度。
 - **部署后重启的标准流程（唯一认可的方式）**：先 `ros2 launch robot_bringup stop_all.launch.py`
   停掉所有内容，再 `ros2 launch robot_bringup robot.launch.py` 启动。
-  **开机自启**：`src/robot_bringup/script/g1_service.sh install` 装 systemd 服务 `g1-robot` 和 `g1-semantic-map`
+  **开机自启**：`install/robot_bringup/share/robot_bringup/script/g1_service.sh install` 装 systemd 服务 `g1-robot` 和 `g1-semantic-map`
   （入口 `g1_autostart.sh`，自带 DDS 环境；参数写在 `g1_autostart.env`，本机专属参数写在 `/opt/G1/g1_autostart.local.env`）。
+  **部署后 Thor 上的 src 会被删除（用户的部署方式）**：运行时（systemd unit、自启脚本、要 source 的文件、文档里的命令）
+  只能引用 `install/`，不能写 `$G1_WS/src/...`。2026-10-03 前的 unit 指向 src，128.146 删 src 后开机自启失败；
+  已改为 unit 固定指向 install，且 `system/` 随包安装。旧 unit 要用新的 install 重新执行一次 `g1_service.sh install`。
   2026-09-30 已装在 `unitree@192.168.112.70`（tegra-ubuntu，wlP1p1s0，sudo 免密）：用 systemctl start 验证过，整栈、语义地图、
   DDS、D435 都正常；还没做重启开机验证。该机 D435i 序列号是 317622075180（默认 347622073141），已写进它的 local.env。
   128.146 那台 Thor 还没装。
@@ -87,7 +90,7 @@ Never spawn multiple subagents for routine debugging.
   不能信 launch 脚本打印的 "not supported" 警告。
 - 查 param / 调 service 前必须先 `source /home/unitree/unitree_ros2/setup.sh`：整套栈跑在 rmw_cyclonedds 上，
   只 source `/opt/ros/jazzy` 时是默认 RMW，topic 能互通但 param/service 调用一律超时无响应（不是节点卡死）。
-- **启动整套栈的 shell 必须 `source src/robot_bringup/system/dds_env.sh`（spdp：组播只做发现、数据单播）**，
+- **启动整套栈的 shell 必须 `source install/robot_bringup/share/robot_bringup/system/dds_env.sh`（spdp：组播只做发现、数据单播）**，
   不能只 source `unitree_ros2/setup.sh`——它把 `CYCLONEDDS_URI` 盖回组播，同机进程间的点云也走网线，被交换机 PAUSE
   限在 ~10 MB/s（D435 掉到 12 Hz、scan 7 Hz，定位输入滞后 = 9-19 定位跳变的根因）。robot.launch.py **不会**自动设置
   DDS（`cyclonedds_g1.xml` 注释里的 dds_config 不存在），全看启动它的 shell。核对：`/proc/<pid>/environ` 里的
@@ -256,6 +259,44 @@ CPU：planner_server 7% → 14%，controller_server 约 26%。
 `drive_on_heading` 同理不得进 BT）；`g1_cmdvel_to_sport` 对 `vx<0` 硬钳位为 0。
 被困时只能靠 清图/Spin/Wait。
 
+## 到点精度：G1 不能原地转（2026-10-03 仿真验证；10-06 已部署 128.146，未实机跑点）
+- **⚠ 2026-10-06 推翻："G1 不能原地转"是错的**，只是 `cmdvel_to_sport` 的 `turn_min_vx: 0.2` 强加的（09-28 整合时写的注释，无实测）。
+  128.146 遥控原地转 8 次，转前/转后激光对地图核对（Thor `spin_watch.py` + `fit_once.py`，数据 `/opt/G1/bags/replay/spin_1006/`）：
+  31° 6.8 cm、58° 7.8、94° 4.2、100° 10.1、158° 16.8、330° 6.6 cm（每次约 5~7 cm 固定量，大角度更多）。腿式里程计在原地踏步时估不准位移。
+  已改 `turn_min_vx: 0.0` + 规划换回 SmacPlanner2D + RPP `use_rotate_to_heading: true`（起步/到点原地转）。下面几条是此前的推理，前提已不成立。
+- `g1_cmdvel_to_sport` 改写指令：|wz|≥0.15 → wz≥0.6 且 vx≥turn_min_vx（原 0.2，走 0.22~0.5 m 半径圆弧；现 0）；vx≥0.05 → vx≥0.3；
+  其余 → 停。"慢速靠近"做不到（min_vx 0.3 同样无实测依据，未验证）。
+- 实机 16:40 去 (-4.21,0.16,0°)：SmacPlanner2D 的路径没朝向，终点调头 180° 走成圆弧，横移 ~0.5 m；`goal_checker stateful: true`
+  位置一进 0.2 m 就锁定，照样报到达。用户实测 `stateful: false` 会到不了点（不能慢速微调，来回绕）——**别再提**。
+- 停车后多转 15~27°：速度平滑器 wz 减速 0.6 rad/s² 的减速段被抬回 0.6 rad/s。
+- 改法（`aid_navigation2/param/nav2_params.yaml`）：规划器换 **SmacPlannerHybrid（DUBIN，最小转弯半径 0.40）**，
+  平滑器 `max_decel` 改 **[-2.0, -0.35, -5.0]**。仿真到点误差 0.16~0.47 m / 3~27° → 0.08~0.22 m / 0~8°。
+  剩下的是 0.3 m/s 最小速度造成的冲过头。仿真在 `src/test/nav_goal_sim/`（humble Nav2 + 照搬抬速规则的 G1 运动学），见其 README。
+- 10-06 部署 128.146 时发现其 install 里 nav2_params 被就地改成 `stateful: false`（10-03 16:46 试验残留），已随部署恢复为 true。
+- **10-06 实机 10 次（128.146，前台↔厕所交替）**：站稳后位置误差 厕所 0.14~0.31 m（均 0.24）、前台 0.34~0.42 m（均 0.38），航向都 ≤6°。
+  根因不在规划器：Hybrid-A* 的 /plan 正确（开过目标再绕 0.4 m 小圈对准朝向进点），但 **MPPI 在离目标 1.4 m 内抄近路直奔终点**
+  （`GoalCritic`/`PathFollowCritic` 的 `threshold_to_consider: 1.4`，终点圈整个在 1.4 m 内）→ 以错误朝向到点（差 150~230°）→
+  stateful 锁位置 → MPPI 发 vx=0、wz=0.9 原地转 3 s → cmdvel_to_sport 抬成圆弧 → 甩出 0.3~0.4 m。仿真同参数，只是低估了横移。
+  待选：降 GoalCritic/PathFollow 阈值到 ~0.3 m，或换 Regulated Pure Pursuit（use_rotate_to_heading: false）。数据：Thor `/opt/G1/bags/replay/goal_err_1006/`
+  （runs.jsonl 每轮轨迹、plans.jsonl 路径、cmds.jsonl 速度；ana.py <轮次> 打印轨迹对路径）。
+  **注意：这 10 次的定位本身也偏了**：测完后（机器人未动、腿式里程计重启前后完全一致）重启定位，新旧位姿差 0.25 m；激光核对新位姿吻合 82%、
+  旧位姿 48%（剖面单峰在新位姿）。输出−LIO 的地图修正量在 10:56 第一次到前台时跳到 ~0.19 m，之后在前台一侧保持 0.15~0.25 m（厕所一侧 0.08~0.16），
+  守护没报（每 60 s 窗口增量 <0.2 m）。所以上面的误差是"相对一个本身偏了 ~0.2 m 的定位"量的，物理到点误差未知。
+  第二轮起 Thor `fit_watch.py` 在每次到点站稳后用激光核对定位（FIT 行，~5 s），区分导航误差和定位误差。
+- **RPP + Hybrid（10-06 11:36 部署）**：厕所 0.13 m、前台 0.18 m（定位误差 1~2 cm），但前台调头圈空间不够：4 次 Hybrid 重规划
+  "exceeded maximum iterations"、RPP "collision ahead"、BT Spin 恢复，46 s。之后改为原地转方案（见上），14:07 已部署 128.146（turn_min_vx 0、2D、RPP 原地转）。
+- **原地转方案实测（10-06 14:11~14:18，128.146，10 次，数据 Thor `/opt/G1/bags/replay/goal_err_1006c/`）**：`turn_min_vx 0` + SmacPlanner2D
+  + RPP `use_rotate_to_heading`。行为正确：起步原地转（vx 0 / wz 0.6）→ 直线 → 进 0.2 m 后原地转到朝向，无调头圈、无重规划，19~28 s。
+  站稳误差（定位误差每次 1~4 cm，已激光核对）：厕所 0.129~0.146（均 0.136 m，航向 -6~-8°），前台 0.137~0.324（均 0.229 m，航向 0~6°）。
+  剩余误差两项：① `xy_goal_tolerance 0.20` → 进 0.2 m 就停下转（前台全偏在 x 向，提前 0.14~0.2 m）；② 原地转 90°（顺时针）时身体后退
+  5~17 cm（第 10 次 0.19 → 0.35 m）。航向 -6~-8° 是 `yaw_goal_tolerance 0.20`（11.5°）内就停转。下一步：两个容差收紧到 0.10。
+- **容差 0.10 实测（10-06 14:23~14:31，10 次，数据 `goal_err_1006d/`）**：xy/yaw_goal_tolerance 0.20 → 0.10。按激光真实位置：
+  厕所 9.5/12.6/14.9/19.8/15.9 cm（均 14.5），前台 7.6/12.7/7.3/11.1/18.0 cm（均 11.3），全体均 12.9 cm、最大 19.8，航向全部 ≤2.8°。
+  第 1 次去厕所时 NDT 又沿走廊把输出拉偏 ~0.2 m，守护 14:24:08 冻结 + 回退 0.19 m，此后一直 NDT_SUSPECT / NEED RELOC（纯 LIO），
+  激光核对定位偏 5~7 cm、方向固定 (-0.05, -0.04)：厕所侧与导航偏差同向叠加，所以厕所侧实际误差偏大。
+  剩余误差主要是到点后原地转时身体位移（前台转 90° 常从 0.06 被甩到 0.2~0.3，站稳时又收回一部分）。
+- 风险（Hybrid 时期）：调头要 ~1.8 m 宽的空地（更窄处规划器会去附近调头或规划失败）；实机停车距离、Hybrid 在 STVL 障碍下的规划耗时要实测。
+
 ## 定位链路（读源码确认，别再算错）
 
 - `lidar_loc` 的 `balance_factor: 0.1`：每次只把 **NDT 残差的 10%** 注入输出
@@ -345,3 +386,12 @@ CPU：planner_server 7% → 14%，controller_server 约 26%。
   末帧对原点激光真值：只告警+投影 0.36 m；只告警+无投影 **3.14 m**（纯当前帧更差，投影不是元凶）；冻结+回退+投影 **0.06 m**（导航段最大 0.23 m）。
   0930 包的四组回放 16:52 后在跑，结果未分析。16:54 已部署到 128.146（freeze + rollback、proj 开），**尚未实机导航验证**。
 - lightning glog 现在由自启脚本设到 `/opt/G1/logs/glog`（原来在 /tmp，重启即丢，09-30 丢过一次）。
+
+### 112.70 "漂移"（2026-10-06）——不是漂移，是重启定位从原点初始化
+- 09:50:30 第一次进定位：机器人在原点，初始化正确（conf 2.6）；走到约 (-5.5,-2.0,21°)。
+- 09:52:05、09:52:22 前端两次 `mode_set localization`（各接着一次 patrol）：`ModeSet("localization")` 在已定位时会
+  **停掉再重启** g1_localization，而 `run_loc_online.cc:72` 永远 `SetInitPose(SE3())` = 地图原点。机器人离原点 5 m，
+  NDT 收敛到错误局部最优（(-0.29,0.03,27°) conf 2.08、(-1.45,-0.25,9°) conf 1.78；Localize() 不看分数照单全收）。
+- 激光核对（loc_check.py）：输出位姿吻合 30%/49%，真值 (-3.92,-2.05,30°) 吻合 74%/97.5% → 偏 ~4 m / 12°。
+- 守护 09:53:25 冻结后一直 NEED RELOC（正确报警，但前端没显示）；PGO 刷 Cholesky failure（错误初始化后的副作用）。
+- 用户确认：是有人在非原点位置手动重启了定位，属操作原因，不需要处理（10-06）。若以后要防呆：重启定位用上次位姿初始化 / 前端提示 need_reloc。
