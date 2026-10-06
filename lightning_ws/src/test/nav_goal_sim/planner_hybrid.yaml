@@ -1,0 +1,34 @@
+# 方案二：SmacPlannerHybrid（Hybrid-A*，DUBIN = 只能前进、有最小转弯半径）。
+# 规划出的路径带朝向，终点朝向在途中就转好（必要时在空地调头），最后一段对准目标朝向直行进入终点。
+# minimum_turning_radius：G1 经 cmdvel_to_sport 后转弯至少 vx 0.2 / wz 0.6~0.9 -> 实际半径 0.22~0.5 m，取 0.40 给控制器留余量。
+planner_server:
+  ros__parameters:
+    GridBased:
+      plugin: "nav2_smac_planner/SmacPlannerHybrid"
+      downsample_costmap: false
+      downsampling_factor: 1
+      tolerance: 0.25
+      allow_unknown: false
+      max_iterations: 1000000
+      max_on_approach_iterations: 1000
+      max_planning_time: 3.0
+      motion_model_for_search: "DUBIN"
+      angle_quantization_bins: 72
+      analytic_expansion_ratio: 3.5
+      analytic_expansion_max_length: 3.0
+      minimum_turning_radius: 0.40
+      reverse_penalty: 2.0
+      change_penalty: 0.0
+      non_straight_penalty: 1.2
+      cost_penalty: 2.0
+      retrospective_penalty: 0.015
+      lookup_table_size: 20.0
+      cache_obstacle_heuristic: false
+      smooth_path: true
+      smoother:
+        max_iterations: 1000
+        w_smooth: 0.3
+        w_data: 0.2
+        tolerance: 1.0e-10
+        do_refinement: true
+        refinement_num: 2

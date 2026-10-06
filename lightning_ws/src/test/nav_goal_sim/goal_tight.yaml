@@ -1,0 +1,5 @@
+# 到点位置容差收紧到 0.12 m（stateful 仍为 true：用户实测 false 会到不了点）
+controller_server:
+  ros__parameters:
+    goal_checker:
+      xy_goal_tolerance: 0.12

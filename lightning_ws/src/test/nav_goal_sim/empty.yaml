@@ -1,0 +1,4 @@
+# 占位：不改变任何参数（与 nav2_sim_params.yaml 的值相同）
+velocity_smoother:
+  ros__parameters:
+    smoothing_frequency: 10.0

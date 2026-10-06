@@ -1,0 +1,4 @@
+# 占位：不改变任何参数（与 nav2_sim_params.yaml 的值相同）
+controller_server:
+  ros__parameters:
+    controller_frequency: 10.0
