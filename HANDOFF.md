@@ -1,15 +1,16 @@
 # 交接说明（给接手的 Claude 会话）
 
-先读：`README.md`（仓库结构、怎么跑）、`lightning_ws/CLAUDE.md`（用户的工作规则和 Thor 固定事实）、
+先读：`README.md`（仓库结构、怎么跑、v1.0.0 状态）、`lightning_ws/CLAUDE.md`（总目录 + 用户的工作规则、问题记录、已知问题；**v1.0.0 以它为准**）、
 `lightning_ws/G1_Communication_Documentation.md`（接口文档，已按源码修订，第五章是语义地图）。
 
 ## 用户和约定
 
 - 用户是初学者：用中文、通俗、一步一步解释。
-- **不要修改原有后端文件**（lightning_ws/src 下除 `semantic_map_ros`、`g1_web`、`g1_sim` 之外的所有包）。
-  需要补功能就新增包/节点/launch 文件。
+- 语义地图阶段约定过不修改原有后端文件；v1.0.0 为了到点精度、定位守护、开机自启已经修改了导航、定位、桥接和启动脚本（见 CLAUDE.md 第 3 章）。
+  测试类功能仍然新增独立包，放在 `lightning_ws/src/test/`，不改现有代码。
 - 遵守 `lightning_ws/CLAUDE.md`：不在本地编译，编译和测试 rsync 到 Thor 上做；rsync 要 `--exclude='bin/'`；
-  部署真机前要用户同意；验证时不发导航目标、不发速度；重启只用 `stop_all.launch.py` → `robot.launch.py`。
+  部署真机前要用户同意；验证时不发导航目标、不发速度；重启用 `g1_service.sh restart`（或部署脚本 `tools/deploy/deploy_to_robot.sh`），
+  **重启前机器人要在地图原点、朝向约 0°**（定位总从原点初始化），重启后用激光核对定位。
 - 分支：`claude/inspiring-ptolemy-fm465d`。用户原始代码在 `g1-source` 分支（本分支的 `lightning_ws/` 与它逐字节一致，只多了三个新包和修订后的接口文档）。
 
 ## 已完成（云端仿真验证）
@@ -37,6 +38,6 @@
 
 ## 已知限制
 
-- 重定位后端未实现（`/start_init_pose` 无人订阅，`/initialpose` Lightning 不订阅）。
+- 重定位：Lightning 已订阅 `/initialpose`，**未实机验证**；`/start_init_pose` 仍无人订阅。
 - `/patrol_control` 只有 `cmd`，巡逻圈数/时长未实现。
-- 橡皮擦改的是地图文件，需重新 `mode_set localization` 才生效。
+- 橡皮擦改的是地图文件，需重新 `mode_set localization` 才生效；这会重启定位并从地图原点初始化，机器人不在原点时定位会偏（CLAUDE.md 3.2.7）。
