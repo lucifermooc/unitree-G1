@@ -66,6 +66,10 @@ if (BUILD_TESTING)
     # 一致性守护是纯逻辑，单独编译，不链接整个 lightning 库
     ament_add_gtest(test_loc_guard test/test_loc_guard.cc src/core/localization/lidar_loc/loc_guard.cc)
     target_link_libraries(test_loc_guard glog gflags)
+    # 2D 栅格扩容错位（多层墙 / 相对 3D 转 1.25°）
+    ament_add_gtest(test_g2p5_map test/test_g2p5_map.cc src/core/g2p5/g2p5_map.cc src/core/g2p5/g2p5_subgrid.cc)
+    target_link_libraries(test_g2p5_map ${OpenCV_LIBS})
+    ament_target_dependencies(test_g2p5_map nav_msgs)
 endif ()
 
 ament_package()

@@ -53,16 +53,24 @@ std::shared_ptr<G2P5Map> G2P5Map::MakeDeepCopy() {
 
 bool G2P5Map::Resize(const float &temp_min_x, const float &temp_min_y, const float &temp_max_x,
                      const float &temp_max_y) {
-    int temp_grid_size_x = ceil((temp_max_x - temp_min_x) / grid_reso_) + 1;
-    int temp_grid_size_y = ceil((temp_max_y - temp_min_y) / grid_reso_) + 1;
+    // 旧数据按整块子网格（grid_reso_ = 16 格 = 0.8 m）搬到新数组，新原点必须和旧原点差整数个子网格。
+    // 原来直接用调用方给的原点（只对齐到 0.05 m），搬移量再 round 成整块，每次扩容旧内容整体错位
+    // |Δ/0.8 - round(Δ/0.8)| * 0.8，最多 0.4 m；多次扩容错位叠加 → 2D 栅格多层墙、相对 3D 像转了 1.25°（2026-10-08）。
+    // 这里把新原点向外扩到子网格整数倍；空地图以 0 为基准，原点始终是 resolution 的整数倍（SetMissPoint 依赖这一点）。
+    const float base_x = grids_ == nullptr ? 0.0f : min_x_;
+    const float base_y = grids_ == nullptr ? 0.0f : min_y_;
+    int min_grid_x = (int)floor((temp_min_x - base_x) / grid_reso_ + 1e-3);
+    int min_grid_y = (int)floor((temp_min_y - base_y) / grid_reso_ + 1e-3);
+    const float new_min_x = base_x + min_grid_x * grid_reso_;
+    const float new_min_y = base_y + min_grid_y * grid_reso_;
+
+    int temp_grid_size_x = ceil((temp_max_x - new_min_x) / grid_reso_) + 1;
+    int temp_grid_size_y = ceil((temp_max_y - new_min_y) / grid_reso_) + 1;
 
     auto **new_grids = new SubGrid *[temp_grid_size_x];
     for (int xi = 0; xi < temp_grid_size_x; ++xi) {
         new_grids[xi] = new SubGrid[temp_grid_size_y];
     }
-
-    int min_grid_x = (int)round((temp_min_x - min_x_) / grid_reso_);
-    int min_grid_y = (int)round((temp_min_y - min_y_) / grid_reso_);
     int max_grid_x = (int)ceil((temp_max_x - min_x_) / grid_reso_);
     int max_grid_y = (int)ceil((temp_max_y - min_y_) / grid_reso_);
 
@@ -86,8 +94,8 @@ bool G2P5Map::Resize(const float &temp_min_x, const float &temp_min_y, const flo
 
     delete[] this->grids_;
     this->grids_ = new_grids;
-    this->min_x_ = temp_min_x;
-    this->min_y_ = temp_min_y;
+    this->min_x_ = new_min_x;
+    this->min_y_ = new_min_y;
     this->max_x_ = temp_max_x;
     this->max_y_ = temp_max_y;
     this->grid_size_x_ = temp_grid_size_x;
