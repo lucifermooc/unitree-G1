@@ -3,6 +3,7 @@
   --accent: #1f6feb; --accent-ink: #ffffff; --ok: #1a7f37; --warn: #9a6700; --bad: #cf222e;
   --btn: #f4f6f8; --btn-hover: #e8ecf0; --map-bg: #d9dee4; --overlay: rgba(255,255,255,.92);
   --robot: #d63384; --point: #1f6feb; --point-sel: #e8590c; --hit: #1a7f37; --nogo: #cf222e;
+  --plan: #1f6feb; --local-plan: #1a9e3f; --arc: #f08c00;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
@@ -10,6 +11,7 @@
     --bg: #111418; --panel: #191d22; --text: #e3e7ec; --muted: #9aa5b1; --line: #313842;
     --accent: #4b8ff5; --btn: #232931; --btn-hover: #2b323b; --map-bg: #0d1013; --overlay: rgba(25,29,34,.92);
     --robot: #f06aa8; --point: #5b9cf8; --point-sel: #f2884b; --hit: #3fb950; --nogo: #f06868;
+    --plan: #5b9cf8; --local-plan: #3fb950; --arc: #ffa94d;
     color-scheme: dark;
   }
 }
@@ -123,3 +125,13 @@ label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 2px;
 .list.debug .res .best { color: var(--hit); font-weight: 600; }
 label.check { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; }
 label.check input { width: auto; }
+
+/* local costmap 图例（颜色与 app.js costmapImage 一致） */
+.cm { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin: 0 3px 0 6px; vertical-align: -1px; }
+.cm.lethal { background: rgb(220, 20, 60); }
+.cm.inscribed { background: rgba(150, 60, 220, .7); }
+.cm.inflated { background: rgba(30, 140, 255, .45); }
+.ln { display: inline-block; width: 16px; height: 0; border-top: 3px solid; margin: 0 3px 0 6px; vertical-align: 3px; }
+.ln.plan { border-top-style: dashed; border-color: var(--plan); }
+.ln.local { border-color: var(--local-plan); }
+.ln.arc { border-color: var(--arc); border-top-width: 4px; }
