@@ -10,7 +10,10 @@ common:
 fasterlio:
   lidar_type: 1                # 1 for Livox serials LiDAR, 2 for Velodyne LiDAR, 3 for ouster LiDAR,
   scan_line: 4
-  blind: 0.1                # 盲区，小于盲区距离的不会处理
+  # 盲区，小于盲区距离的不会处理。G1 雷达正下方 0.25 m 内是机身回波（每帧约 40% 的点），进 LIO 会让它少算位移、
+  # 进 NDT 会把定位拉偏 0.4 m 以上（2026-10-08，0930b 包）；0.25~0.6 m 实测没有点，取 0.4 留余量。
+  # 注意 2026-10-08 之前 pointcloud_preprocess.cc 的盲区判断有运算符优先级 bug，这个值实际从未生效。
+  blind: 0.4
   time_scale: 1e-3             # 兼容不同数据集的时间单位，仅对Velodyne LiDAR(lidar_type=2)生效
 
   skip_lidar_num: 0 # 点云的跳帧情况

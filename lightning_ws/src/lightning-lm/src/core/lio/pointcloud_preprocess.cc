@@ -67,12 +67,15 @@ void PointCloudPreprocess::Process(const livox_ros_driver2::msg::CustomMsg::Shar
             return;
         }
 
-        if ((abs(cloud_full_[i].x - cloud_full_[i - 1].x) > 1e-7) ||
-            (abs(cloud_full_[i].y - cloud_full_[i - 1].y) > 1e-7) ||
-            (abs(cloud_full_[i].z - cloud_full_[i - 1].z) > 1e-7) &&
-                (cloud_full_[i].x * cloud_full_[i].x + cloud_full_[i].y * cloud_full_[i].y +
-                     cloud_full_[i].z * cloud_full_[i].z >
-                 (blind_ * blind_))) {
+        // 2026-10-08：原来三个 || 外面少一层括号，&& 只和 z 那项结合，盲区过滤实际从未生效；
+        // G1 上每帧约 40% 的点（雷达正下方 0.25 m 内的机身）因此进了 LIO 和 NDT。
+        // 去重也改为和原始相邻点比：point_filter_num > 1 时 cloud_full_[i - 1] 没被写过，是上一帧的残留。
+        const auto &prev = msg->points[i - 1];
+        if (((abs(cloud_full_[i].x - prev.x) > 1e-7) || (abs(cloud_full_[i].y - prev.y) > 1e-7) ||
+             (abs(cloud_full_[i].z - prev.z) > 1e-7)) &&
+            (cloud_full_[i].x * cloud_full_[i].x + cloud_full_[i].y * cloud_full_[i].y +
+                 cloud_full_[i].z * cloud_full_[i].z >
+             (blind_ * blind_))) {
             is_valid_pt[i] = 1;
         }
 

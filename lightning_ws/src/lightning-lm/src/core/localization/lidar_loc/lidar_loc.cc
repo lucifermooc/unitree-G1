@@ -108,6 +108,8 @@ bool LidarLoc::Init(const std::string& config_path) {
     yaml.GetOptional("lidar_loc", "fast_converge_ok_frames", options_.fast_converge_ok_frames_);
     yaml.GetOptional("lidar_loc", "fast_converge_max_frames", options_.fast_converge_max_frames_);
     yaml.GetOptional("lidar_loc", "track_min_score", options_.track_min_score_);
+    yaml.GetOptional("lidar_loc", "log_ndt_hessian", options_.log_ndt_hessian_);
+    yaml.GetOptional("lidar_loc", "ndt_dump_dir", options_.ndt_dump_dir_);
     options_.balance_factor_ = std::clamp(options_.balance_factor_, 0.0, 1.0);
     options_.fast_converge_factor_ = std::clamp(options_.fast_converge_factor_, 0.0, 1.0);
     LOG(INFO) << "lidar loc balance factor: " << options_.balance_factor_
@@ -488,6 +490,8 @@ bool LidarLoc::UpdateGlobalMap() {
     ndt->setStepSize(0.1);
     ndt->setMaximumIterations(4);
     ndt->setNumThreads(4);
+    // 与构造时一致（原先替换对象时漏设，默认 0.1）：线搜索步长下限 = epsilon/2，0.1 时每步至少走 0.05、退不回小步长
+    ndt->setTransformationEpsilon(0.01);
 
     map_->SetNewTargetForNDT(ndt);
     ndt->initCompute();
@@ -735,6 +739,24 @@ void LidarLoc::Align(const CloudPtr& input) {
 
     loc_success_lo = Localize(current_pose_esti, fitness_score, input, output_cloud);  // LO 那个肯定会算
     double score_lo = fitness_score;
+
+    if (!options_.ndt_dump_dir_.empty()) {
+        // 诊断导出：<时刻>.pcd 为 NDT 输入（雷达系，前 header.seq 个点是当前帧，其余是投影的历史关键帧）；
+        // index.txt 每行：时刻 当前帧点数 总点数 初值(xyz qxyzw) NDT结果(xyz qxyzw) 分值
+        static std::ofstream dump_index(options_.ndt_dump_dir_ + "/index.txt");
+        char name[64];
+        std::snprintf(name, sizeof(name), "/%.6f.pcd", current_time);
+        pcl::io::savePCDFileBinary(options_.ndt_dump_dir_ + name, *input);
+        auto put = [](std::ostream& os, const SE3& T) {
+            os << " " << T.translation().transpose() << " " << T.unit_quaternion().coeffs().transpose();
+        };
+        dump_index << std::fixed << std::setprecision(6) << current_time << " " << input->header.seq << " "
+                   << input->size();
+        put(dump_index, guess_from_lo);
+        put(dump_index, current_pose_esti);
+        dump_index << " " << fitness_score << "\n";
+        dump_index.flush();
+    }
 
     SE3 res_of_lo = current_pose_esti;
     SE3 res_of_dr = current_pose_esti;
@@ -1053,6 +1075,40 @@ bool LidarLoc::Localize(SE3& pose, double& confidence, CloudPtr input, CloudPtr 
     ndt->align(*output, guess_pose);
     trans = ndt->getFinalTransformation();
     confidence = ndt->getTransformationProbability();
+    if (!trans.allFinite() || !std::isfinite(confidence)) {
+        // NaN 位姿交给 Sophus 会直接 abort 整个定位进程；本帧当作匹配失败，保持初值、分值记 0
+        LOG(WARNING) << "ndt result not finite, keep guess";
+        confidence = 0;
+        return false;
+    }
+
+    if (options_.log_ndt_hessian_) {
+        // 得分是最大化，A = -H 在解附近半正定；变量顺序 x y z roll pitch yaw（地图系）。
+        // xy：只动平移时的曲率；schur：其余 4 维各自取最优后，xy 剩下的曲率（含航向-平移耦合）。
+        // 特征值单位是 得分/m²，与点数成正比，n 一并输出便于归一化。ang 为弱方向在地图系的角度（度，[-90, 90)）。
+        Eigen::Matrix<double, 6, 6> A = -ndt->getHessionMatrix();
+        A = 0.5 * (A + A.transpose()).eval();
+        auto eig2 = [](const Eigen::Matrix2d& m, double& l0, double& l1, double& ang) {
+            Eigen::SelfAdjointEigenSolver<Eigen::Matrix2d> es(m);
+            l0 = es.eigenvalues()(0);
+            l1 = es.eigenvalues()(1);
+            const Eigen::Vector2d v = es.eigenvectors().col(0);
+            ang = std::atan2(v.y(), v.x()) * 180.0 / M_PI;
+            if (ang >= 90) ang -= 180;
+            if (ang < -90) ang += 180;
+        };
+        double b0, b1, ba, s0, s1, sa;
+        eig2(A.block<2, 2>(0, 0), b0, b1, ba);
+        const Eigen::Matrix4d A_oo = A.block<4, 4>(2, 2);
+        const Eigen::Matrix<double, 2, 4> A_xo = A.block<2, 4>(0, 2);
+        const Eigen::Matrix2d S = A.block<2, 2>(0, 0) - A_xo * A_oo.completeOrthogonalDecomposition().solve(A_xo.transpose());
+        eig2(0.5 * (S + S.transpose()), s0, s1, sa);
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 6, 6>> es6(A);
+        LOG(INFO) << std::fixed << std::setprecision(3) << "ndt hess: n " << input->size() << " it "
+                  << ndt->getFinalNumIteration() << " conf " << confidence << " t " << trans(0, 3) << " " << trans(1, 3)
+                  << " | xy " << b0 << " " << b1 << " ang " << ba << " | schur " << s0 << " " << s1 << " ang " << sa
+                  << " | eig6 " << es6.eigenvalues().transpose();
+    }
 
     if (loc_inited_ == false && confidence > options_.min_init_confidence_) {
         loc_success = true;

@@ -240,6 +240,7 @@ void Localization::LidarOdomProcCloud(CloudPtr cloud) {
 
     // 送激光定位的点云（副本，LIO 之后不会再改它）：当前帧 + 历史关键帧投影，或只用当前帧（yaml loc_input.proj_kfs）
     CloudPtr scan = options_.loc_proj_kfs_ ? lio_->GetProjCloud() : CloudPtr(new PointCloudType(*lio_->GetScanUndist()));
+    scan->header.seq = lio_->GetScanUndist()->size();  // 其中当前帧的点数（排在前面），仅供 ndt_dump_dir 诊断导出
 
     // 快速收敛阶段（初始化后到残差达标前）每帧都做激光定位，不等关键帧（静止时关键帧 2 s 才一个）
     if (options_.loc_on_kf_ && lidar_loc_->Converged()) {
