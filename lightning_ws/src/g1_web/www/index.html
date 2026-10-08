@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>G1 控制台</title>
-<link rel="stylesheet" href="style.css?v=3">
+<link rel="stylesheet" href="style.css?v=5">
 </head>
 <body>
 <header id="topbar">
@@ -130,6 +130,16 @@
         <button id="btnResume">继续</button>
         <button id="btnCancel" class="danger">取消</button>
       </div>
+      <h2>导航显示</h2>
+      <div class="row wrap">
+        <label class="check"><input type="checkbox" id="navCostmap" checked> local costmap</label>
+        <label class="check"><input type="checkbox" id="navPaths" checked> 规划路径</label>
+      </div>
+      <p class="note">导航模式下叠加在地图上。<br>
+        local costmap（/local_costmap/costmap，机器人周围 6×6 米）：
+        <span class="cm lethal"></span>障碍物 <span class="cm inscribed"></span>贴身危险带 <span class="cm inflated"></span>膨胀代价<br>
+        路径：<span class="ln plan"></span>全局（/plan） <span class="ln local"></span>局部（/received_global_plan，控制器正在跟的一段）
+        <span class="ln arc"></span>预测轨迹（/lookahead_collision_arc，未来约 1 秒）</p>
       <h2>单点导航</h2>
       <div class="row">
         <label for="navPoint" class="sr">目标点位</label>
@@ -202,6 +212,6 @@
 <div id="toast" role="status" aria-live="polite"></div>
 
 <script src="vendor/roslib.js"></script>
-<script src="app.js?v=5"></script>
+<script src="app.js?v=8"></script>
 </body>
 </html>

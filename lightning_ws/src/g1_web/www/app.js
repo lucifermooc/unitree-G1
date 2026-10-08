@@ -45,6 +45,8 @@ const S = {
   selectedId: null, pending: null, drag: null,
   nogoStart: null, eraser: [],
   patrolSel: [], semHitId: null, mappingPreview: false, semLog: [],
+  costmap: null,      // {canvas, width, height, resolution, ox, oy}：导航时的 local costmap
+  globalPlan: null, localPlan: null, arc: null,  // 导航时的路径，map 系 [[x, y], ...]
 };
 window.app = S;  // 方便调试和自动化测试
 
@@ -121,6 +123,7 @@ function setConn(on) {
   S.connected = on;
   $("stConn").classList.toggle("on", on);
   $("stConn").lastElementChild.textContent = on ? "已连接" : "未连接";
+  if (!on) updateNavOverlays();
 }
 async function onConnected() {
   setConn(true);
@@ -143,6 +146,7 @@ async function onConnected() {
     document.querySelectorAll(".modes button").forEach((b) =>
       b.classList.toggle("active", b.dataset.mode === slam || b.dataset.mode === control));
     updateMappingInfo();
+    updateNavOverlays();
   });
   subscribe("/task_status", "aid_robot_msgs/msg/AidTaskStatus", (m) => {
     S.task = m;
@@ -502,6 +506,59 @@ async function taskControl(cmd) {
   if (!r.success) throw new Error(`${cmd} 失败：${r.message}`);
 }
 
+// 导航叠加层：导航模式（control = patrol）下订阅，离开导航模式或断线就退订并清掉。
+// local costmap 是 map 系的滚动窗口（6×6 m、0.05 m），值已被 nav2 换成 0~100：100 致命、99 内切带、1~98 膨胀、-1 未知。
+// 路径：/plan 是 SmacPlanner2D 的全局路径（BT 1 Hz 重规划，没有平滑器，控制器直接跟它）；
+// /received_global_plan 是 RPP 实际在跟的那一段（裁到 costmap 范围内）；/lookahead_collision_arc 是 RPP 按当前速度预测的未来轨迹。
+const NAV_OVERLAYS = [
+  { topic: "/local_costmap/costmap", type: "nav_msgs/msg/OccupancyGrid", box: "navCostmap", key: "costmap",
+    conv: costmapImage, opts: { throttle_rate: 500, queue_length: 1, compression: "cbor" } },  // CBOR 下 int8[] 直接是 Int8Array
+  { topic: "/plan", type: "nav_msgs/msg/Path", box: "navPaths", key: "globalPlan", conv: pathPoints,
+    opts: { throttle_rate: 500, queue_length: 1 } },
+  { topic: "/received_global_plan", type: "nav_msgs/msg/Path", box: "navPaths", key: "localPlan", conv: pathPoints,
+    opts: { throttle_rate: 200, queue_length: 1 } },
+  { topic: "/lookahead_collision_arc", type: "nav_msgs/msg/Path", box: "navPaths", key: "arc", conv: pathPoints,
+    opts: { throttle_rate: 200, queue_length: 1 } },
+];
+function updateNavOverlays() {
+  const nav = S.connected && S.robotStatus.split("+")[1] === "patrol";
+  for (const o of NAV_OVERLAYS) {
+    const want = nav && $(o.box).checked, t = topics[o.topic];
+    if (want && (!t || t.ros !== S.ros)) {  // 重连后旧连接上的订阅已失效，要重订
+      subscribe(o.topic, o.type, (m) => { S[o.key] = o.conv(m); draw(); }, o.opts);
+    } else if (!want && (t || S[o.key])) {
+      unsubscribe(o.topic);
+      S[o.key] = null; draw();
+    }
+  }
+}
+function pathPoints(path) {  // 统一换到 map 系；RPP 有的调试话题在 base_link 系，按当前机器人位姿换算
+  const frame = (path.header.frame_id || "map").replace(/^\//, "");
+  const pts = path.poses.map((p) => [p.pose.position.x, p.pose.position.y]);
+  if (frame === "map") return pts;
+  if (frame !== "base_link" || !S.robot) return null;
+  const { x, y, yaw } = S.robot, c = Math.cos(yaw), s = Math.sin(yaw);
+  return pts.map(([px, py]) => [x + c * px - s * py, y + s * px + c * py]);
+}
+function costmapImage(grid) {
+  const { width, height, resolution } = grid.info, d = grid.data;
+  const c = document.createElement("canvas");
+  c.width = width; c.height = height;
+  const cctx = c.getContext("2d"), img = cctx.createImageData(width, height), px = img.data;
+  for (let j = 0; j < height; j++) {
+    for (let i = 0; i < width; i++) {
+      const v = d[j * width + i];
+      if (v <= 0) continue;  // 空闲、未知不画
+      const k = ((height - 1 - j) * width + i) * 4;  // 栅格第 0 行在下（y 最小），图片第 0 行在上
+      const [r, g, b, a] = v >= 100 ? [220, 20, 60, 230] : v >= 99 ? [150, 60, 220, 180]
+        : [30, 140, 255, 30 + Math.round((v / 98) * 130)];
+      px[k] = r; px[k + 1] = g; px[k + 2] = b; px[k + 3] = a;
+    }
+  }
+  cctx.putImageData(img, 0, 0);
+  return { canvas: c, width, height, resolution, ox: grid.info.origin.position.x, oy: grid.info.origin.position.y };
+}
+
 // ---------------- 语义地图 ----------------
 function renderSemantic(res) {
   const box = $("semResult"); box.innerHTML = "";
@@ -701,6 +758,13 @@ function arrow(x, y, yaw, color, label, big) {
     ctx.fillStyle = color; ctx.fillText(label, sx + 13, sy + 18);
   }
 }
+function polyline(pts, color, width, dash = []) {
+  if (!pts || pts.length < 2) return;
+  ctx.strokeStyle = color; ctx.lineWidth = width; ctx.setLineDash(dash); ctx.lineJoin = ctx.lineCap = "round";
+  ctx.beginPath();
+  pts.forEach(([x, y], i) => { const [a, b] = w2s(x, y); i ? ctx.lineTo(a, b) : ctx.moveTo(a, b); });
+  ctx.stroke(); ctx.setLineDash([]);
+}
 function draw() {
   const r = canvas.getBoundingClientRect();
   ctx.clearRect(0, 0, r.width, r.height);
@@ -708,6 +772,18 @@ function draw() {
   if (!S.map) return;
   ctx.imageSmoothingEnabled = false;
   ctx.drawImage(S.map.img, S.view.ox, S.view.oy, S.map.width * S.view.scale, S.map.height * S.view.scale);
+  if (!S.mappingPreview && S.costmap) {
+    const cm = S.costmap, k = (cm.resolution / S.map.resolution) * S.view.scale;
+    const [a, b] = w2s(cm.ox, cm.oy + cm.height * cm.resolution);
+    ctx.drawImage(cm.canvas, a, b, cm.width * k, cm.height * k);
+    ctx.strokeStyle = css("--muted"); ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+    ctx.strokeRect(a, b, cm.width * k, cm.height * k); ctx.setLineDash([]);
+  }
+  if (!S.mappingPreview) {  // 规划路径：全局在下，局部和预测轨迹叠在上面
+    polyline(S.globalPlan, css("--plan"), 3, [8, 5]);
+    polyline(S.localPlan, css("--local-plan"), 3);
+    polyline(S.arc, css("--arc"), 4);
+  }
   if (!S.mappingPreview) {
     // 禁行线
     ctx.strokeStyle = css("--nogo"); ctx.lineWidth = 3; ctx.setLineDash([8, 5]);
@@ -725,14 +801,6 @@ function draw() {
     for (const e of S.eraser) {
       const [a, b] = w2s(e.x - e.size / 2, e.y + e.size / 2), s = (e.size / S.map.resolution) * S.view.scale;
       ctx.fillRect(a, b, s, s);
-    }
-    // 巡逻路线
-    if (S.tab === "nav" && S.patrolSel.length > 1) {
-      const pts = S.patrolSel.map((id) => S.points.find((p) => p.id === id)).filter(Boolean);
-      ctx.strokeStyle = css("--accent"); ctx.lineWidth = 2; ctx.setLineDash([4, 4]);
-      ctx.beginPath();
-      pts.concat(pts[0]).forEach((p, i) => { const [a, b] = w2s(p.x, p.y); i ? ctx.lineTo(a, b) : ctx.moveTo(a, b); });
-      ctx.stroke(); ctx.setLineDash([]);
     }
     // 点位
     for (const p of S.points) {
@@ -894,6 +962,7 @@ $("btnPause").onclick = () => guard(() => taskControl("pause"));
 $("btnResume").onclick = () => guard(() => taskControl("resume"));
 $("btnCancel").onclick = () => guard(() => taskControl("cancel"));
 $("btnPatrolStart").onclick = () => guard(startPatrol);
+$("navCostmap").onchange = $("navPaths").onchange = updateNavOverlays;
 $("btnNogoDraw").onclick = () => setTool(S.tool === "nogo" ? null : "nogo");
 $("btnNogoSave").onclick = () => guard(saveNogo);
 $("btnEraser").onclick = () => setTool(S.tool === "eraser" ? null : "eraser");
