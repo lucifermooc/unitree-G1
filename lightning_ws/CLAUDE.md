@@ -37,7 +37,7 @@ Never spawn multiple subagents for routine debugging.
 
 **1. 系统与机器现状**
 - 1.1 数据链路：MID360+IMU → lightning（LIO + NDT + 守护）→ Nav2（2D 规划 + RPP，STVL costmap）→ 速度桥 → G1；网页控制台跑在电脑上。
-- 1.2 机器：128.146 是主测机、v1.0.0 已全部部署；112.70 还是 09-30 的代码；开发机不编译。
+- 1.2 机器：128.146 是主测机、v1.0.0 已全部部署，10-08 又部署了定位修复（lightning）；112.70 还是 09-30 的代码；开发机默认不编译。
 - 1.3 v1.0.0 指标：到点平均 12.9 cm、最大 19.8 cm、航向 ≤2.8°；定位正常时 1~4 cm；costmap 残影和近身噪点清零。
 
 **2. 硬性规则（动手前必读）**
@@ -62,9 +62,11 @@ Never spawn multiple subagents for routine debugging.
   - 3.2.3 每帧定位反而漂移 → 保持只在关键帧定位，启动用快速收敛。
   - 3.2.4 LIO 恒滞后 0.35 s → 补跑积压帧。
   - 3.2.5 段错误日志丢失 → glog 逐条落盘，放到 `/opt/G1/logs/glog`。
-  - 3.2.6 走廊地图双解 / 导航时被拉偏 → 加一致性守护（冻结 + 回退）和单帧跳变检查；**部分解决**。
-  - 3.2.7 112.70 偏 4 m → 不是漂移，是在非原点重启了定位（操作原因）。
-  - 3.2.8 10-06 导航时又被拉偏两次 → 一次守护没发现，一次冻结后 NEED RELOC；**未解决**。
+  - 3.2.6 走廊地图双解 / 导航时被拉偏 → 加一致性守护（冻结 + 回退）和单帧跳变检查（根因见 3.2.9）。
+  - 3.2.8 10-06 导航时又被拉偏两次 → 一次守护没发现，一次冻结后 NEED RELOC（根因见 3.2.9）。
+  - 3.2.9 **拉偏的根因（10-08）** → 盲区过滤有优先级 bug，每帧 40% 机身点进了 LIO 和 NDT；pclomp 的线搜索也被关掉了。
+    两处都已修，0930b 离线全程误差 ≤2.3 cm（原来 1.9 m）；**10-08 已部署 128.146 实机验证**：1 h / 483 m，
+    有效激光核对 27 次全部 0~4.2 cm，守护全程 GOOD，跳变检查 0 次。
 - 3.3 Costmap 障碍物
   - 3.3.1 动态障碍残影清不掉 → MID360 盲区无法清除；D435 做只清除源，补标高物体。
   - 3.3.2 MID360 迁到 3D STVL → 加 `scan_range_filter` 去机身回波。
@@ -79,11 +81,7 @@ Never spawn multiple subagents for routine debugging.
   - 3.4.5 别再试 → `stateful: false`、MPPI 配调头圈、Hybrid 调头圈。
   - 3.4.6 仿真 → `src/test/nav_goal_sim`，会低估横移，新方案没重跑。
 - 3.5 桥接与系统
-  - 3.5.1 `/odom` 没有发布者 → Python 节点缺 `__main__`，启动即退出。
-  - 3.5.2 开机自启失败 → unit 指向被删掉的 src；改为指向 install。
   - 3.5.3 planner_server 段错误 → 禁行区层加锁。
-  - 3.5.4 录包停不下来 → `-d` 是分片时长；用 `timeout -s INT`。
-  - 3.5.5 子节点变孤儿 → 一律用 `stop_all` / `g1_service.sh`。
   - 3.5.6 D435 点云停发 → 链接到了系统 NEON 版 SDK。
   - 3.5.7 `/livox/points` 由 `point_filter` 产生 → LIO 和 Nav2 都不吃它。
   - 3.5.8 install 里的配置被手改过 → 部署前用 md5 核对。
@@ -91,8 +89,8 @@ Never spawn multiple subagents for routine debugging.
 - 3.6 09-17 交接里的遗留项 → RealSense 参数警告、禁行区节点重复等，状态未核实。
 
 **4. v1.0.0 已知问题（按优先级）**
-- 4.1 导航时 NDT 沿走廊拉偏定位（最重要）；守护抓不到慢拉、冻结后不会自动恢复、前端不显示。
-- 4.2 定位总从地图原点初始化；**128.146 当前偏 0.33 m，用前先重定位**。
+- 4.1 导航时 NDT 沿走廊拉偏定位：根因已修并实机验证（3.2.9，10-08）；剩守护本身的老问题和前端不显示 need_reloc。
+- 4.2 定位总从地图原点初始化，不看分数；离原点几米处重启仍会错，防呆还要做。
 - 4.3 到点原地转时身体位移，是剩余到点误差的主要来源。
 - 4.4 RPP 不会绕障，没测过有人挡路。
 - 4.5 新导航方案没有仿真。
@@ -105,7 +103,8 @@ Never spawn multiple subagents for routine debugging.
 
 **5. 排查方法与工具**
 - 5.1 出问题先录包（定位问题用 `--loc`）。
-- 5.2 定位：**激光对地图核对是唯一可信的真值**；对比"输出 − LIO"区分地图匹配和 LIO 的问题。
+- 5.2 定位：**激光对地图核对是唯一可信的真值**；对比"输出 − LIO"区分地图匹配和 LIO 的问题；
+  NDT Hessian 日志 / 输入导出两个诊断开关；开发机可编译做离线回放（需用户授权）。
 - 5.3 到点精度测量：`goal_err.py` + `plan_rec.py` + `fit_watch.py`，误差按激光真实位置算。
 - 5.4 Costmap：先分层、再找来源；离线回放台。
 - 5.5 远程操作的坑：`pgrep/pkill -f` 会杀掉自己的 ssh 会话等。
@@ -139,15 +138,16 @@ MID360 /livox/lidar（CustomMsg，逐点 offset_time）+ IMU
 ### 1.2 机器
 | 机器 | 状态 |
 |---|---|
-| **Thor 128.146**（`unitree@192.168.128.146`，`/opt/G1/lighting_ws`，aarch64 / Ubuntu 24.04 / jazzy） | 主测机。v1.0.0 全部已部署（10-06）。sudo 要密码（服务启停免密）；开机自启 unit 指向 install；D435 序列号与默认值一致 |
+| **Thor 128.146**（`unitree@192.168.128.146`，`/opt/G1/lighting_ws`，aarch64 / Ubuntu 24.04 / jazzy） | 主测机。v1.0.0 全部已部署（10-06）；10-08 只部署了 lightning（定位修复 3.2.9，已实机验证）。sudo 要密码（服务启停免密）；开机自启 unit 指向 install；D435 序列号与默认值一致 |
 | **Thor 112.70**（`unitree@192.168.112.70`，tegra-ubuntu，wlP1p1s0） | **还是 09-30 的代码**，开机自启 unit 仍指向 src（删 src 后会起不来）。sudo 免密。D435i 序列号 317622075180，写在 `/opt/G1/g1_autostart.local.env` |
-| 开发机（本地） | x86 / Ubuntu 22.04 / humble。**不在本地编译**，本地 install 不完整、不可用。Meteor Lake 核显在 6.8 内核下会 GPU hang 导致整机卡死（`journalctl -b -1 -k | grep -E 'i915|DMAR|GPU HANG'`） |
+| 开发机（本地） | x86 / Ubuntu 22.04 / humble。**默认不在本地编译**，本地 install 不完整、不可用；用户授权时可在 scratchpad 编 lightning 做离线回放（5.2）。Meteor Lake 核显在 6.8 内核下会 GPU hang 导致整机卡死（`journalctl -b -1 -k | grep -E 'i915|DMAR|GPU HANG'`） |
 
 ### 1.3 v1.0.0 实测指标（128.146，2026-10-06）
 | 项目 | 结果 | 数据 |
 |---|---|---|
 | 到点精度（前台↔厕所 10 次，按激光真实位置） | 平均 12.9 cm、最大 19.8 cm，航向 ≤2.8°，10/10 成功，单程 21~30 s | Thor `/opt/G1/bags/replay/goal_err_1006d/` |
 | 定位（正常时，到点后激光核对） | 1~4 cm | `goal_err_1006c/fit.txt` |
+| 定位（10-08 修复后，导航 1 h / 483 m，停稳后激光核对） | 有效 27 次 0~4.2 cm、航向 ≤0.3°，不随路程增大；守护全程 GOOD | Thor `/opt/G1/bags/replay/stop_fit_1008.log` |
 | costmap 动态障碍残影 | local 0（清除延迟 p90 0.3 s），global 约 2 s 清掉 | 见 3.3 |
 | costmap 近身噪点 | base_link 0.5 m 内 D435 致命格 0；走路时手的误标 41 次 → 0 | 见 3.3 |
 
@@ -166,6 +166,9 @@ MID360 /livox/lidar（CustomMsg，逐点 offset_time）+ IMU
 - 部署脚本：`tools/deploy/deploy_to_robot.sh <IP> [包名 ...]`（默认 lightning semantic_map_ros robot_bringup）：
   rsync 按内容同步 → `g1_service.sh stop` → 只编译指定包 → `start` → 打印守护状态。
   排除 `bin/`、`thirdparty/`、`script/g1_humble_env.sh`。重启会让定位重新初始化，见 2.3。
+- **部署 lightning 前先补 thirdparty**：脚本不传 `lightning-lm/thirdparty`，而部署后删 src 会把它一起删掉，下次编译就缺 Sophus / livox_ros_driver。
+  用 Thor 自己的原件：`mkdir -p $WS/src/lightning-lm && cp -a /opt/G1/exp/base/src/lightning-lm/thirdparty $WS/src/lightning-lm/`
+  （`/opt/G1/exp/*` 下 4 份内容一致；本机 `G1_deps` 那份是从上游补的，和它不同，不要传）。Thor 上编 lightning 约 3 分钟。
 - **部署后 Thor 上的 src 会被删除**（用户的部署方式）：systemd unit、自启脚本、要 source 的文件、文档里的命令
   只能引用 `install/`，不能写 `$G1_WS/src/...`。
 - 不能把本地 x86 二进制同步到 Thor：rsync 一律 `--exclude='bin/'`（lightning 可执行文件已输出到 `build/lightning/bin`，
@@ -294,15 +297,15 @@ IMU 晚到时 `SyncPackages` 失败，点云留在缓冲里，之后每来一帧
 glog 默认缓冲 INFO 最长 30 s，进程被信号杀死时丢失。解决：`FLAGS_logbuflevel = -1`
   逐条落盘；glog 目录由自启脚本设到 `/opt/G1/logs/glog`（原来在 /tmp，重启即丢，09-30 丢过一次）。
 
-#### 3.2.6 定位漂移 / 地图双解（09-29~30）——部分解决，仍有问题（4.1）
+#### 3.2.6 定位漂移 / 地图双解（09-29~30）——当时只加了防护，根因见 3.2.9
 - 现象：机器人回到原点，`/base_link_pose` 偏 1.9 m / 19°，glog 无告警，NDT 分值仍有 1.96。
-- 根因在地图匹配，不在 LIO：LIO 85 分钟回起点只差 9 cm，漂移全部来自 lidar_loc 的地图修正。
+- 漂移主要来自 lidar_loc 的地图修正（LIO 85 分钟回起点只差 9 cm；但单趟沿走廊会少算约 4%，同样是机身点造成的，见 3.2.9）。
   - 旧图走廊尽头**双解**：纵向最优解在 x≈−4.5（对）和 x≈−5.0（错）之间跳；该图行走区有大量现场已不存在的点团，
     只有一面沿走廊的长直墙约束纵向。同一个包实机落在 −4.5、离线回放落在 −4.97，激光吻合度 49% vs 24%。
   - 新图走廊**导航时必现**（09-30）：~0.3 m/s 导航、两端快速转身时，输出沿走廊被往原点方向拉 1.46 m、2.2 m；
     同时 LIO 与腿式里程计互差 ≈0.1 m。手动遥控慢走、原地快转只偏 0.1~0.2 m。不是 DDS（spdp、0 断档、0 丢包），
     离线回放无 Nav2 也复现（峰值 1.32 m）→ CPU 竞争不是主因。
-  - 走行中 NDT 残差常卡 0.55~0.6 m = 饱和（跟踪 NDT 4 次迭代、步长 0.1，单帧最多挪 ~0.6 m），不是收敛。
+  - 走行中 NDT 残差常卡 0.55~0.6 m：线搜索被关掉后沿牛顿方向盲走 6 步 × 0.1 m，得分不升反降（3.2.9），不是收敛。
 - 解决（已部署）：
   - **一致性守护 `lidar_loc/loc_guard.{h,cc}`**：窗口（60 s 或 LIO 行程 5 m）内比较"输出相对运动"与"LIO 相对运动"，
     超 0.2 m / 5°（静止时 0.1 m）判 NDT 可疑；腿式里程计投票区分 NDT 错 / LIO 错；`action: freeze` + `rollback`：
@@ -327,11 +330,47 @@ glog 默认缓冲 INFO 最长 30 s，进程被信号杀死时丢失。解决：`
 - 处理：用户确认是操作原因（有人在非原点重启）。防呆未做（4.2）。
 - 验证方法：激光核对（`loc_check.py`）输出位姿吻合 30% / 49%，真值吻合 74% / 97.5%。
 
-#### 3.2.8 导航时 NDT 又被沿走廊拉偏（10-06，两次）——未解决（4.1）
+#### 3.2.8 导航时 NDT 又被沿走廊拉偏（10-06，两次）——根因见 3.2.9，10-08 修复后实机未再出现
 - 10:56 第一次导航到前台后，输出 − LIO 的修正量跳到 ~0.19 m，之后在前台一侧保持 0.15~0.25 m。
   守护**没报**：每个 60 s 窗口的增量都低于 0.2 m。直到重启定位后才发现，新旧位姿差 0.25 m（腿式里程计证明机器人没动），
   激光吻合度新位姿 82%、旧位姿 48%。
 - 14:23 去厕所途中被拉偏 ~0.2 m，守护 14:24:08 冻结 + 回退 0.19 m，之后一直 NEED RELOC，纯 LIO 下定位偏 5~7 cm。
+
+#### 3.2.9 导航时被拉偏的根因：机身点 + NDT 线搜索被关掉（10-08）——已修，已部署 128.146 实机验证
+- 现象复现：`corridor_newmap_0930b` 包里的线上输出 +648 s 起被拉偏，+700 s 偏 1.9 m / 14°；本地离线回放
+  （关掉单帧跳变检查 = 09-30 线上配置）在同一时刻同样偏 1.9 m → 由数据决定，不是 CPU / 丢帧。开机初始化也偏 0.42 m / 2°
+  （4.2 的 0.33 m 同类）。所有结论都按激光对地图吻合度判真值。
+- 根因 1（主因）：**`pointcloud_preprocess.cc` Livox 分支的盲区判断少一层括号**（`a || b || c && 距离 > blind`），
+  盲区从未生效。MID360 打到正下方 0.25 m 内的机身，每帧约 4000 / 10000 点进了 LIO 和 NDT（`point_filter.yaml` 早就注明过，costmap 那边另行过滤）。
+  - 对 NDT：机身点随雷达走，把目标函数拉歪。初始化那帧 6 自由度 NDT 的全局最优在 1.8 m 外；去掉机身点后从两个起点都收敛到激光真值（吻合 0.96）。
+  - 对 LIO：机身点在机体系里不动，LIO 少算位移，第一趟走廊 6 m 少算 0.24 m（4%）。
+- 根因 2（放大器）：**pclomp `computeStepLengthMT` 的 `interval_converged = (step_max - step_min) > 0`**（PCL 旧版 bug，1.12 改成 `< 0`），
+  More-Thuente 线搜索一次都不跑：每步沿牛顿方向盲走 [epsilon/2, 0.1]，不检查得分升降。初值偏 0.3 m 以上、Hessian 不定时（走廊轴向曲率只有横向的 1/3~1/6），
+  NDT 越迭代得分越低，沿走廊走出 0.6 m（导出输入后复算：出错帧初值得分 1.5~1.8，NDT 结果 1.07~1.47，激光最优 1.7~2.0）。
+  当前帧和投影关键帧各自的激光最优位姿只差 0.09 m / 0.3°，运动中当前帧吻合度 0.92，**去畸变和关键帧投影都没问题**。
+- 修复（10-08 提交并部署 128.146）：
+  - `pointcloud_preprocess.cc`：补括号；去重改为和 `msg->points[i - 1]` 比（`point_filter_num > 1` 时 `cloud_full_[i - 1]` 是上一帧残留）。
+  - `default_livox.yaml`：`fasterlio.blind 0.1 → 0.4`（机身点 ≤0.25 m，0.25~0.6 m 实测没有点）。
+  - `ndt_omp_impl.hpp`：改回 `< 0`；线搜索内循环后重算 Hessian（原来被注释，`computeHessian` 没实现，用 `computeDerivatives(..., true)`）；
+    `trialValueSelectionMT` 补 PCL 1.12 的 `a_t == a_l` 两处保护（否则除零出 NaN，Sophus abort）；`a_t` 非有限时退回 `step_min`。
+  - `lidar_loc.cc`：`UpdateGlobalMap` 补 `setTransformationEpsilon(0.01)`（与构造时一致，原来替换对象时漏设，默认 0.1）；
+    `Localize()` 结果非有限时本帧按失败处理，不交给 Sophus。
+  - 诊断开关（默认关，5.2）：`lidar_loc.log_ndt_hessian`、`lidar_loc.ndt_dump_dir`。
+- 验证（本地离线回放 0930b，6 个时刻激光连续优化求偏差）：
+  - 线上配置（冻结 + 回退 + 跳变检查 + 投影）：全程 ≤2.3 cm / 0.23°（+20 s 刚初始化 5.5 cm），守护一次没冻结；修复前同配置偏 0.4~0.6 m。
+  - 09-30 线上配置（无跳变检查）：+760 / +950 s 从 1.9 m 降到 0；只用当前帧也全程准。LIO 第一趟误差 4% → 0.8%。
+  - 只修盲区、NDT 用旧版：这个包也准。但故意给错初值（1.36 m / 10°、0.85 m / 15°），新版 18 / 10 帧收敛，
+    旧版 50 帧内不收敛 / 44 帧 → 线搜索修复保留。
+  - 代价：NDT 单次耗时中位 21 → 29 ms，p90 34 → 78 ms（x86、两路回放并行；Thor 上要实测）。
+- **实机验证（10-08，128.146，只部署 lightning）**：原点重启后激光核对吻合 0.80（正常值），初始化正确。用户前端发点导航约 1 h、
+  定位轨迹累计 483 m（走廊来回、两端转身，单段最长连续 91 m），每次停稳后自动激光核对（`stop_fit.py`，5.2）：
+  - 30 次核对，3 次采集时机器人在动作废，**有效 27 次误差 0~4.2 cm、航向 ≤0.3°**，不随路程增大；原点处固定约 −3 cm（x）。
+  - 守护 3659 帧全部 GOOD；跳变拒绝 / 冻结 / 回退 / NaN / NEED RELOC 均 0 次（10-06 两段旧日志分别拒绝 3、8 次）。
+  - Thor 上 NDT 耗时（glog `loc from` → `confidence` 间隔）：中位 38 ms、p90 91 ms、max 153 ms；旧版中位 29~34、p90 36~37 ms。
+    p90 变长来自线搜索和 epsilon 0.01 的额外迭代；跟踪定位只在关键帧跑（行走时约 2 Hz），不影响实时性。
+  - 观察（未查证）：行走时相邻定位帧的航向交替摆约 ±5°（LIO 和 NDT 同步摆，二者差值恒定），推测是雷达所在上身随步态扭转，
+    腿式里程计（骨盆）只摆约 2°。旧版是否同样没有对照数据。
+- 遗留：地图是用有 bug 的代码建的，沿建图轨迹有一串机身点（雷达高度），目前不影响定位，重建地图时会自然消失。
 
 ### 3.3 Costmap 障碍物（09-21~24，已部署并实机验证）
 
@@ -488,17 +527,19 @@ BGE-M3 从本地目录 `/home/unitree/models/bge-m3` 加载（Thor 不方便联�
 
 ## 4. v1.0.0 已知问题（按优先级）
 
-### 4.1 导航时 NDT 沿走廊把定位拉偏（最重要）
-- 10-06 又出现两次（3.2.8）。慢拉（每个 60 s 窗口 <0.2 m）守护发现不了；守护冻结后 NDT 残差一直 >0.15 m，**不会自动恢复**，
-  只能停在 NEED RELOC、靠 LIO 推算（偏差 5~7 cm，暂时不增长）。
-- 前端不显示 `/lightning/loc_status` 里的 need_reloc，操作员不知道定位已冻结。
-- 线索：走廊只有一面长直墙约束纵向；NDT 残差饱和（单帧最多挪 ~0.6 m）；上游 issue #65（倒装 MID360 走廊漂移）、#5（退化场景，引入里程计）、
-  #122（NDT 高分误匹配，ICP 二次校验有效）。数据：`/opt/G1/bags/corridor_newmap_0930`、`corridor_newmap_0930b`、`goal_err_1006*/`。
+### 4.1 导航时 NDT 沿走廊把定位拉偏——根因已修，10-08 实机验证通过
+- 根因和修复见 3.2.9（机身点 + NDT 线搜索被关掉）。10-08 部署 128.146，导航 1 h / 483 m，有效激光核对 27 次全部 0~4.2 cm，
+  守护全程 GOOD、跳变检查 0 次。10-06 的两次（3.2.8）没有原始数据，实机未再复现，按同因处理。
+- 112.70 还是 09-30 的代码，没有这个修复（4.9）。
+- 守护的老问题仍在：慢拉（每个 60 s 窗口 <0.2 m）发现不了；冻结后不会自动恢复；前端不显示 `/lightning/loc_status` 的 need_reloc。
+- 单帧跳变检查（0.2 m）在初值偏差大时会挡住所有正确修正（3.2.9：修盲区前，线上配置因此一直偏 0.4~0.6 m）。修复后没再触发，暂时保留。
 
 ### 4.2 定位初始化总是从地图原点开始，没有防呆
 - `run_loc_online` 写死 `SetInitPose(SE3())`，`Localize()` 不看分数；前端"定位"按钮在已定位时也会重启定位。
 - **10-06 部署 semantic_map_ros 后，机器人就在原点附近（朝向 −4°）重启，定位仍偏了 0.33 m**（激光最优 (0.05, 0.02) vs 输出 (0.37, −0.08)），
-  守护显示 GOOD，没发现。当时 128.146 处于这个状态，下次用之前要先重定位。
+  守护显示 GOOD，没发现。（10-08 部署修复后在原点 (0.12, −0.35, −11°) 重启，激光核对初始化正确。）
+  0930b 离线复现了同类现象（原点初始化偏 0.42 m / 2°），根因是机身点（3.2.9），修复后初值偏 1.36 m / 10° 也能收敛；
+  但在离原点几米处重启（3.2.7）仍会错，防呆仍要做。
 - 待做：重启时用上次的位姿初始化，或多候选比分；`ModeSet("localization")` 已定位时不重启；前端显示 need_reloc；`/initialpose` 实机验证。
 
 ### 4.3 到点后原地转向的身体位移
@@ -533,8 +574,8 @@ v1.0.0 剩余到点误差的主要来源（转 90° 常从 6 cm 被甩到 20~30 
 - `walk_monitor.py`（Thor）第 46 行订阅回调要写成 `lambda m: self.q.append(m)`，Thor 上是坏的版本。
 - `test_g1_g2p5_config.py` 有 3 个早已存在的失败（URDF 关节已改名 `body_to_mid360_joint`）。
 - `laser_mapping.cc` MakeKF 的 `20 / 180 * M_PI` 是整数除法（=0），投影关键帧只按 3 m 更新；修它会改关键帧策略，未动。
-- lightning 自己的 tag 过滤（`pointcloud_preprocess.cc:53`）是注释掉的，去重 / 盲区判断有 `||` / `&&` 优先级 bug。
-- `loc_input.proj_kfs` 对漂移的贡献尚未确定（实机 A/B 没做完：开—关—开、每轮原点重启，统计用 Thor `ab_stats.py <glog> t0 t1`）。
+- lightning 自己的 tag 过滤（`pointcloud_preprocess.cc:53`）是注释掉的（盲区 / 去重的优先级 bug 10-08 已修，3.2.9）。
+- `loc_input.proj_kfs` 不是漂移原因：修复后开 / 关都准（3.2.9）。
 - 3.6 的遗留项未核实。
 
 ## 5. 排查方法与工具
@@ -548,7 +589,11 @@ v1.0.0 剩余到点误差的主要来源（转 90° 常从 6 cm 被甩到 20~30 
 - **激光对地图核对是唯一可信的真值**（NDT 分值 confidence 不能当作位置正确的依据）：
   - `/opt/G1/bags/replay/loc_check.py <map_dir> [cx cy]`：抓当前 scan，体素查表，在当前位姿 / 原点 / 指定点附近搜 x-y-yaw，打 x/y 剖面看是否单峰。
     点云地图地面在建图雷达高度下方，z 偏移约 −1.1~−1.25。正常时 10 cm 内吻合 0.8 左右、25 cm 内 0.97。
-  - `fit_once.py <map_dir>`（单次，输出 JSON）、`fit_watch.py`（每次到点后自动核对）。
+  - `fit_once.py <map_dir>`（单次，输出 JSON）、`fit_watch.py`（每次到点后自动核对，靠 `goal_err` 的 log.txt 触发）。
+  - `stop_fit.py <map_dir> <glog INFO>`（`run_stop_fit.sh` 带环境 nohup 启动）：用户从前端发点时用。读 glog 判断停稳
+    （离上次核对 >0.3 m、3 s 内 xy <2 cm 且航向 <1°），抓激光核对；采集期间位姿跨度 >3 cm / 1° 判"无效（采集时在动）"——
+    不加这条时起步那一刻抓的帧会报出 12 cm 的假误差。静止时 NDT 约 2 s 一帧，判停稳的窗口不能要求帧数多。
+  - `glog_stats.py <glog INFO>`：NDT 耗时（`loc from` → `confidence` 间隔）、置信度、跳变拒绝 / NaN / NEED RELOC 计数。
   - `bag_fit.py`：从包里取某时刻的 scan 比较候选位姿。
 - **区分地图匹配和 LIO 的问题**：比较 |输出 − 起点| 与 |LIO − 起点|，或用 `out_vs_lio.py <glog>` 看"输出 − LIO 推算"的修正量随时间的变化；
   `walk_attrib.py <glog>`（输出 / 纯 LIO / 纯里程计三路对比）、`live_attrib.py`（实时版）。
@@ -560,6 +605,15 @@ v1.0.0 剩余到点误差的主要来源（转 90° 常从 6 cm 被甩到 20~30 
   - `track_min_score` 默认 0.0；`loc_monitor.py` 的 "confidence<1.3" 是经验值，不是定位器门限。
   - `sync package failed` 只是 IMU 还没覆盖雷达帧尾，下帧会补跑，不等于丢包。
   - 判断航向跳变用实际时间戳差算角速度，不要假定 0.1 s/帧。
+- **NDT 诊断开关**（默认关，只打日志 / 导出，不改结果）：
+  - `lidar_loc.log_ndt_hessian: true`：每次匹配一行 `ndt hess:`（点数、迭代次数、分值、xy 块和舒尔补的特征值与弱方向角、6 维特征值）。
+    条件数 = 强 / 弱特征值；新图走廊 2.5~6，不是奇异。
+  - `lidar_loc.ndt_dump_dir: <目录>`：每次跟踪匹配导出 NDT 输入 PCD（雷达系，前 `header.seq` 个点是当前帧，其余是投影关键帧）
+    和 `index.txt`（时刻、当前帧点数、总点数、初值、NDT 结果、分值）。拿它在 Python 里复算 NDT 得分，判断"目标函数错了"还是"优化器走错了"。
+  - 判断 NDT 是否往下坡走：对比初值和结果处的 NDT 得分（pclomp 同规则重算），结果更低就是优化器的问题。
+- **开发机离线回放**（需用户授权编译，10-08 用过）：步骤和脚本在 `/home/ap/G1_bags/replay_scripts/ndt_1008/README.md`。
+  要点：源码副本放 scratchpad、补 `/home/ap/G1_deps/lightning_thirdparty`；链接加 `-L/home/ap/G1_deps/lib`（否则链到系统 glog 0.4）；
+  jazzy 录的包要改写 `metadata.yaml` 才能被 humble 读；回放有随机性（多线程时序），同一配置两次结果可能不同，结论要多跑几组。
 - **离线回放对有些地图不具代表性**（旧图在线 NDT 残差 p90 0.064 m，离线 0.42 m）。`run_loc_offline` 退出时会往地图目录写动态图层，
   回放一律用地图拷贝；临时启动配置 `/tmp/g1_lightning_*.yaml` 停栈时会被清理，离线要用 install 里的 `default_livox.yaml` 自己改。
 
@@ -600,6 +654,7 @@ Thor `/opt/G1/bags/replay/` 下，用 `run_goal_err*.sh` / `run_plan_rec*.sh` / 
 ### 6.1 数据（Thor `/opt/G1/bags/`）
 - 建图：`map500d_0919`（8 分钟 0 断档）、`mapping_corridor_0929`（覆盖建图，已 reindex）。
 - 定位：`locguard_0929`（旧图 20 min 行走）、`corridor_newmap_0930`、`corridor_newmap_0930b`（导航时拉偏复现，`--loc`）；离线 A/B 结果 `replay/ab0930/`。
+  开发机 `/home/ap/G1_bags/` 有 `corridor_newmap_0930b`（完整）、地图 `maps/1790676615248`、Thor 脚本拷贝；`corridor_newmap_0930` 拷贝中断，不能用。
 - costmap：`walkby_0923`（修复前）、`walkby_s2_0923`（修复后）、`demo2_0922_1350`、`d435_ghost_0922`（错深度）、`d435near_0924` / `d435near2_0924`（修手前 / 后）、
   `hang_0924`（机身回波）、`move_0924`（错深度 + 飞点）。
 - 到点测量：`replay/goal_err_1006`（MPPI）、`goal_err_1006b`（MPPI 阈值 0.3 / RPP + Hybrid）、`goal_err_1006c`（原地转，容差 0.2）、
@@ -608,7 +663,9 @@ Thor `/opt/G1/bags/replay/` 下，用 `run_goal_err*.sh` / `run_plan_rec*.sh` / 
 ### 6.2 lightning 上游事实（对照 github 上游 1325fed 确认，不是我们改坏的）
 - `Localize()` 永远返回 true（issue #127：原本靠 RTK 重置，开源版"定位丢了没办法处理"）。
 - `YawSearch` 上游注释掉（#123：会选错角度）；我们只在 `/initialpose` 重定位时用（粗匹配前 3 名做精匹配后按精分判定）。
-- 跟踪 NDT 在 `UpdateGlobalMap` 里 4 次迭代、步长 0.1。
+- 跟踪 NDT 在 `UpdateGlobalMap` 里 4 次迭代（循环条件 `>`，实际最多 6 步）、步长 0.1；pclomp 构造时 `transformation_epsilon_ = 0.1`，
+  线搜索步长下限 = epsilon/2。pclomp 的 More-Thuente 线搜索原本是关掉的（`> 0`），10-08 已修（3.2.9）。
+- `pointcloud_preprocess.cc` Livox 分支的盲区 / 去重判断有优先级 bug，`blind` 从未生效，10-08 已修（3.2.9）。
 - 退化检测 / DR 多初值比较上游都注释掉了；lightning 的 "DR" 就是 LIO 自身 IMU 状态，不独立。
 - NDT 输入不是纯当前帧：`GetProjCloud()` = 当前帧 + 最多 5 个历史关键帧各取最早 1001 点；`fasterlio.proj_kfs` 管不到（上游判断被注释）。
 

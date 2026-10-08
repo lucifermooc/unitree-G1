@@ -69,6 +69,10 @@ class LidarLoc {
         /// 航向只看 yaw（NDT 的 roll/pitch 常偏几度，由 gravity_constrain 另行修正）。配置在 loc_guard 段。
         double max_ndt_jump_m_ = 0.0;
         double max_ndt_jump_deg_ = 0.0;
+        /// 诊断：每次匹配后把 NDT Hessian 的特征分解写进 glog（"ndt hess:" 行），用于查退化方向；只打日志，不影响结果
+        bool log_ndt_hessian_ = false;
+        /// 诊断：非空时把每次跟踪匹配的 NDT 输入点云（雷达系 PCD）和初值 / 结果导出到该目录（index.txt），只用于离线分析
+        std::string ndt_dump_dir_;
 
         /// 一致性守护（见 loc_guard.h），配置在 yaml 的 loc_guard 段
         LocGuard::Options guard_;

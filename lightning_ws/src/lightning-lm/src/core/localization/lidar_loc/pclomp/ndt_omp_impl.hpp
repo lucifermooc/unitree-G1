@@ -737,6 +737,13 @@ bool pclomp::NormalDistributionsTransform<PointSource, PointTarget>::updateInter
 template <typename PointSource, typename PointTarget>
 double pclomp::NormalDistributionsTransform<PointSource, PointTarget>::trialValueSelectionMT(
     double a_l, double f_l, double g_l, double a_u, double f_u, double g_u, double a_t, double f_t, double g_t) {
+  // 以下两处保护取自 PCL 1.12：a_t == a_l 时 Case 1~3 的 (a_t - a_l) 为 0，会算出 NaN
+  if (a_t == a_l && a_t == a_u) return (a_t);
+  if (a_t == a_l) {
+    double z = 3 * (f_t - f_u) / (a_t - a_u) - g_t - g_u;
+    double w = std::sqrt(z * z - g_t * g_u);
+    return (a_u + (a_t - a_u) * (w - g_u - z) / (g_t - g_u + 2 * w));
+  }
   // Case 1 in Trial Value Selection [More, Thuente 1994]
   if (f_t > f_l) {
     // Calculate the minimizer of the cubic that interpolates f_l, f_t, g_l and g_t
@@ -853,7 +860,10 @@ double pclomp::NormalDistributionsTransform<PointSource, PointTarget>::computeSt
   double g_u = auxilaryFunction_dPsiMT(d_phi_0, d_phi_0, mu);
 
   // Check used to allow More-Thuente step length calculation to be skipped by making step_min == step_max
-  bool interval_converged = (step_max - step_min) > 0, open_interval = true;
+  // 2026-10-08：原为 "> 0"（PCL 旧版 bug，1.12 已改为 "< 0"），step_max > step_min 时线搜索一次都不跑，
+  // 每步沿牛顿方向盲走 [step_min, step_max]、不检查得分是否上升。初值离真值较远、Hessian 不定时（走廊轴向约束弱），
+  // 牛顿方向指向鞍点，NDT 越迭代得分越低、沿走廊走出 0.6 m（0930b 包实测；和机身点一起造成导航时拉偏，见 CLAUDE.md 3.2.9）。
+  bool interval_converged = (step_max - step_min) < 0, open_interval = true;
 
   double a_t = step_init;
   a_t        = std::min(a_t, step_max);
@@ -895,6 +905,10 @@ double pclomp::NormalDistributionsTransform<PointSource, PointTarget>::computeSt
       a_t = trialValueSelectionMT(a_l, f_l, g_l, a_u, f_u, g_u, a_t, psi_t, d_psi_t);
     } else {
       a_t = trialValueSelectionMT(a_l, f_l, g_l, a_u, f_u, g_u, a_t, phi_t, d_phi_t);
+    }
+    // 兜底：插值退化（sqrt 负数、除零）时 a_t 为 NaN，std::min/max 会原样传下去，变换变成 NaN 后 Sophus 直接 abort
+    if (!std::isfinite(a_t)) {
+      a_t = step_min;
     }
 
     a_t = std::min(a_t, step_max);
@@ -953,8 +967,10 @@ double pclomp::NormalDistributionsTransform<PointSource, PointTarget>::computeSt
   // If inner loop was run then hessian needs to be calculated.
   // Hessian is unnessisary for step length determination but gradients are required
   // so derivative and transform data is stored for the next iteration.
-  // if (step_iterations)
-  //   computeHessian (hessian, trans_cloud, x_t);
+  // 线搜索内循环用 compute_hessian=false 求导，会把 hessian 清零，必须在最终点上重算（PCL 1.12 同样处理）
+  if (step_iterations) {
+    score = computeDerivatives(score_gradient, hessian, trans_cloud, x_t, true);
+  }
 
   return (a_t);
 }
