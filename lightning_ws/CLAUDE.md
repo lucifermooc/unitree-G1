@@ -122,7 +122,7 @@ Never spawn multiple subagents for routine debugging.
 - 5.5 远程操作的坑：`pgrep/pkill -f` 会杀掉自己的 ssh 会话等。
 
 **6. 参考**
-- 6.1 录包和测量数据目录；6.2 lightning 上游事实；6.3 其他文档；6.4 Lightning-LM / Nav2 学习路线（在线文档链接）。
+- 6.1 录包和测量数据目录；6.2 lightning 上游事实；6.3 其他文档；6.4 Lightning-LM / Nav2 数据流详解（在线文档链接）。
 
 ---
 
@@ -727,11 +727,11 @@ Thor `/opt/G1/bags/replay/` 下，用 `run_goal_err*.sh` / `run_plan_rec*.sh` / 
 - `src/test/nav_goal_sim/README.md`：到点精度仿真。
 - VLN（LightNav-0）评估在独立工作区 `/home/ap/project/G1_VLN`，不在本仓库。
 
-### 6.4 学习路线（在线文档，不在本仓库）
+### 6.4 数据流详解（在线文档，不在本仓库）
 两份都是 claude.ai 上的 Claude Docs 文档（私有，只有账号本人能看）；也可在 claude.ai/code/artifacts 或 Claude Code 终端 `/artifacts` 里找到。
 按数据流组织，每段对照代码、公式和本文第 3 章的实际调试结果。
 
 | 文档 | 链接 | 内容 |
 |---|---|---|
-| Lightning-LM 学习路线（按数据流 · 对照代码与公式） | https://claude.ai/artifact/9k6Yn1agyvZpCPVwmkFxT9 | 预处理 → LIO → 建图后端 → NDT 定位 → g2p5，对应 3.1 / 3.2 |
-| Nav2 学习路线（按数据流 · 对照代码与公式） | https://claude.ai/artifact/2SE5jkNmKTza81qWfcc9Tw | 输入 / TF → costmap → SmacPlanner2D → RPP / MPPI → 速度链 → BT，对应 3.3 / 3.4 / 3.5 |
+| Lightning-LM 数据流详解（对照代码与公式） | https://claude.ai/artifact/9k6Yn1agyvZpCPVwmkFxT9 | 预处理 → LIO → 建图后端 → NDT 定位 → g2p5，对应 3.1 / 3.2 |
+| Nav2 数据流详解（对照代码与公式） | https://claude.ai/artifact/2SE5jkNmKTza81qWfcc9Tw | 输入 / TF → costmap → SmacPlanner2D → RPP / MPPI → 速度链 → BT，对应 3.3 / 3.4 / 3.5 |
