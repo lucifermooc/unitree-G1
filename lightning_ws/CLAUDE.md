@@ -111,6 +111,7 @@ Never spawn multiple subagents for routine debugging.
 - 4.9 112.70 没更新。
 - 4.10 Thor 终端的 DDS 参与者编号不够。
 - 4.11 其他小问题。
+- 4.12 collision_monitor 按仓库默认配置不启动（速度桥直接吃 `/cmd_vel`），和链路图不符；实机状态待核实。
 
 **5. 排查方法与工具**
 - 5.1 出问题先录包（定位问题用 `--loc`）。
@@ -134,9 +135,13 @@ MID360 /livox/lidar（CustomMsg，逐点 offset_time）+ IMU
   → TF map->base_link（平面）、base_link->body_link（躯干倾斜）；/base_link_pose
   → Nav2：SmacPlanner2D 全局规划 + Regulated Pure Pursuit 控制（起步/到点原地转向）
            costmap 用 STVL（MID360 + D435），global 另有静态层和禁行区
-  → /cmd_vel → velocity_smoother → collision_monitor → /cmd_vel_safe
+  → /cmd_vel_nav → velocity_smoother → /cmd_vel
+  → [仅 use_collision_monitor:=true 时] collision_monitor → /cmd_vel_safe
   → g1_cmdvel_to_sport（最小有效速度改写）→ Unitree LocoClient::SetVelocity
 ```
+- **collision_monitor 按仓库默认配置不启动**（4.12）：`robot.launch.py` 的 `use_collision_monitor` 默认 false，
+  `g1_autostart.env` 的 `G1_ROBOT_ARGS` 为空；此时 `g1_navigation.launch.py` 让速度桥直接订阅 `/cmd_vel`，
+  `/cmd_vel_safe` 没有发布者。实机是否被 `/opt/G1/g1_autostart.local.env` 覆盖成 true 未核实。
 - 障碍点云：MID360 的 `/lightning/registered_scan` → `scan_range_filter` → `/lightning/registered_scan_nav`；
   D435 原始点云 → `d435_mark_filter` → `/camera/camera/depth/mark_points`（标记），原始点云另做清除源。
 - 本体：`/odommodestate` → `sport_to_odom` → `/odom`（不发 TF，只在导航模式运行）；`/lf/bmsstate` → `/battery_state`。
@@ -463,6 +468,8 @@ glog 默认缓冲 INFO 最长 30 s，进程被信号杀死时丢失。解决：`
 - `d435_mark_filter.yaml`：min_depth 0.40、neighbor 开（0.08 / 3）、temporal 关、self_crop 0.5 m × 0.45~0.85 m、floating 关。
 - MID360：`scan_range_filter` 0.25 m + base_link 水平 0.5 m；`livox_mark` ≥0.15 m / 2.5 m；global `observation_persistence 0.2`。
 - launch `use_realsense_obstacles:=false` 时两张图里的 D435 源都摘掉（含 `drop_d435_clear`）。前提：栈跑在 spdp DDS 下，否则多订 D435 会把点云挤上网线。
+- 当前膨胀代价（r = robot_radius 0.50，inflation_radius 0.75）：local k=8 → 0.55 m 168、0.60 113、0.65 75、0.70 50、0.75 34；
+  global k=6 → 0.55 186、0.65 102、0.75 56；再外为 0。梯度带宽 0.25 m。`nav2_params.yaml` 里旧注释按 r=0.30 算（0.45→76、边界 51），10-14 已订正。
 - 代价常识：`252·exp(-k(d-r))` 只在 inflation_radius 内成立；254 lethal、253 内切带、255 未知。nav2 没有"被困"检测；
   `collision_margin_distance` 是软惩罚，不是硬安全圈。
 
@@ -612,6 +619,15 @@ g2p5 扩容错位，`g2p5_map.cc` 已修、单测通过，10-08 部署。还要�
 - `loc_input.proj_kfs` 不是漂移原因：修复后开 / 关都准（3.2.9）。
 - 3.6 的遗留项未核实。
 
+### 4.12 collision_monitor 按默认配置不启动（10-14 对照代码发现，实机未核实）
+- 现象：本文 1.1 和 `aid_navigation2/G1_DIRECT_MAP.md`、`g1_nav_bridge/README.md` 的链路图都画了 collision_monitor，
+  但 `robot.launch.py` 里 `use_collision_monitor` 默认 false（`robot_bringup/README.md` 写明"完成验收前默认关闭"），
+  `g1_autostart.env` 也没打开。所以按仓库配置，Nav2 速度经 velocity_smoother 直接进速度桥，没有 0.70 m 停车圈。
+  `g1_navigation_direct.launch.py`、`g1_navigation.launch.py` 单独启动时默认是 true，两种入口不一致。
+- 疑点：5.3 记录 10-06 用 `plan_rec.py` 录到了 `/cmd_vel_safe`，说明当时实机可能开着（`/opt/G1/g1_autostart.local.env`？）。
+- 要做：在 128.146 上 `ros2 node list | grep collision`、`ros2 topic info /cmd_vel_safe -v` 和查看 local.env，确认实际状态后再改本条。
+  若要默认启用，注意其参数用的是 `/lightning/registered_scan`（未经 `scan_range_filter`），停车圈 0.70 m、`min_points 4`，需先验收。
+
 ## 5. 排查方法与工具
 
 ### 5.1 出现问题先录包
@@ -655,7 +671,7 @@ g2p5 扩容错位，`g2p5_map.cc` 已修、单测通过，10-08 部署。还要�
 Thor `/opt/G1/bags/replay/` 下，用 `run_goal_err*.sh` / `run_plan_rec*.sh` / `run_fit_watch*.sh` nohup 启动（自带 ROS 和 DDS 环境），都只订阅：
 - `goal_err.py <输出目录>`：每次 `/nav_to_pose` 开一轮，`/task_status` 变成功时记"判到达"，位姿稳定后记"站稳"，按目标朝向拆成纵向 / 横向误差；
   点位坐标写在脚本里（前台、厕所）。
-- `plan_rec.py`：录 `/plan` 和速度指令（`/cmd_vel_safe` 要用 best-effort QoS 才收得到）。
+- `plan_rec.py`：录 `/plan` 和速度指令（`/cmd_vel_safe` 要用 best-effort QoS 才收得到；collision_monitor 没开时它没有发布者，改录 `/cmd_vel`，见 4.12）。
 - `fit_watch.py`：每轮站稳后用激光核对定位，**到点误差要按激光真实位置算**，否则会被定位误差污染（10-06 早上那一轮就是）。
 - `ana.py <轮次>`、`runplans.py <轮次>`：打印轨迹对路径（最近路径点序号会暴露抄近路）和速度指令。
 - 原地转测试：`spin_watch.py`（自动识别转向开始 / 结束，转前转后激光核对）。

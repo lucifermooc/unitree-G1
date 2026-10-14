@@ -515,12 +515,13 @@ local_costmap:
         # inflation_radius 只决定代价梯度染多远，不产生不可通行格；碰撞阈值由 robot_radius 定。
         # 2026-09-21 对齐旧系统（0.50 / 8.0）：原 0.85/2.0 把障碍外 0.85 m 全染成中高代价，
         # 0.50 m 处仍有 169，RViz 上几乎没有白色，MPPI 的代价地形也被抹平。
-        # 现在 cost(d)=252·exp(-8·(d-0.30))：0.45→76、0.55→34、0.65→15，0.5 m 外迅速回到白色，
-        # “只走白色”才成为可执行判据。代价是 0.30~0.45 m 的排斥力更陡，窄道通过更果断。
+        # 公式（d = 到障碍距离，r = robot_radius）：d ≤ r → 253；r < d ≤ inflation_radius → 252·exp(-k·(d-r))；再外为 0。
+        # 当前 r=0.50、k=8：0.55→168、0.60→113、0.65→75、0.70→50、0.75→34，0.75 m 外直接回到白色，
+        # “只走白色”才成为可执行判据。（2026-10-14 订正：旧注释的 0.45→76 等数字是按 r=0.30 算的。）
         # 改动此处必须同步 MPPI 的 ObstaclesCritic.inflation_radius / cost_scaling_factor。
         cost_scaling_factor: 8.0
-        # 随 robot_radius 同步：始终保持 inflation_radius = robot_radius + 0.20，
-        # 梯度带宽 0.20 m、边界代价 51，避免出现代价从 76 直接掉 0 的台阶。
+        # 随 robot_radius 同步：梯度带宽 = inflation_radius - robot_radius = 0.25 m（测试要求 0.10~0.40），
+        # 边界代价 34，避免代价从高值直接掉 0 的台阶。
         inflation_radius: 0.75
       always_send_full_costmap: true
 
@@ -705,6 +706,7 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         # 全局用 6.0（比局部略缓），让 A* 在空旷处更愿意走通道中线；与旧系统一致。
+        # r=0.50、k=6：0.55→186、0.65→102、0.75→56，0.75 m 外为 0。
         cost_scaling_factor: 6.0
         inflation_radius: 0.75
       always_send_full_costmap: true
