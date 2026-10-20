@@ -371,6 +371,11 @@ KeepoutLayer::updateCosts(
         if (data == NO_INFORMATION) {
           continue;
         }
+        // 掩码是整张 /map 大小，禁行线以外全填 0（forbidden_map_create.cpp），未知格只能被禁行线覆盖。
+        // 2026-10-15 112.70：原来 0 也覆盖未知格，global costmap 约 98 万个未知格变成空闲，规划穿过灰色区域。
+        if (old_data == NO_INFORMATION && data < LETHAL_OBSTACLE) {
+          continue;
+        }
         if (data > old_data || old_data == NO_INFORMATION) {
           master_array[index] = data;
         }

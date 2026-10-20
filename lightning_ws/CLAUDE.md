@@ -84,6 +84,7 @@ Never spawn multiple subagents for routine debugging.
   - 3.3.3 "随时都是障碍物" → 飞点、前摆的手、机身回波、地面回波分别处理，近身噪点清零。
   - 3.3.4 试过并否定的方案 → 降高度阈值、放宽 1.5 m、删顶部行、帧间滤波等，别再试。
   - 3.3.5 当前 costmap 配置 → 改之前先读，测试守着。
+  - 3.3.6 **全局规划穿过灰色未知区（10-15）** → 禁行区掩码非禁行处全填 0，禁行区层拿 0 覆盖未知格；已改代码，10-20 随 Orin 30524 首次部署，未实机验证。
 - 3.4 导航与到点精度
   - 3.4.1 现象 → Nav2 报到达，人却偏 0.3~0.5 m。
   - 3.4.2 演进过程 → MPPI 0.31 m → RPP+Hybrid 0.13~0.18 m → 原地转 0.18 m → 容差 0.1 后 **0.13 m**。
@@ -157,7 +158,7 @@ MID360 /livox/lidar（CustomMsg，逐点 offset_time）+ IMU
 | 机器 | 状态 |
 |---|---|
 | **Thor 128.146**（`unitree@192.168.128.146`，`/opt/G1/lighting_ws`，aarch64 / Ubuntu 24.04 / jazzy） | 主测机，**v3.0.0**：v1.0.0 全部部署于 10-06，10-08 又部署了 lightning（定位修复 3.2.9，已实机验证；同日再部署 g2p5 扩容修复 3.1.7）。sudo 要密码（服务启停免密）；开机自启 unit 指向 install；D435 序列号与默认值一致 |
-| **Thor 112.70**（`unitree@192.168.112.70`，tegra-ubuntu，wlP1p1s0） | **还是 09-30 的代码**，开机自启 unit 仍指向 src（删 src 后会起不来）。sudo 免密。D435i 序列号 317622075180，写在 `/opt/G1/g1_autostart.local.env` |
+| **Thor 112.70**（10-15 起 `192.168.1.103` 直连；阿里云 10-20 起 `ssh g1-thor` = `-p 30422 unitree@47.108.223.180`，原 45022，tegra-ubuntu，wlP1p1s0） | 10-15 核对：`nav2_params.yaml` 与 `4213f93`（v1.0.0 导航）md5 一致，lightning 仍是 10-08 修复前的版本（无 3.2.9），src 已删。手已改装。D435 线易松（10-15 开机没认到，重插后 USB 3 正常）。sudo 免密。D435i 序列号 317622075180，写在 `/opt/G1/g1_autostart.local.env` |
 | 开发机（本地） | x86 / Ubuntu 22.04 / humble。**默认不在本地编译**，本地 install 不完整、不可用；用户授权时可在 scratchpad 编 lightning 做离线回放（5.2）。Meteor Lake 核显在 6.8 内核下会 GPU hang 导致整机卡死（`journalctl -b -1 -k | grep -E 'i915|DMAR|GPU HANG'`） |
 
 ### 1.3 实测指标（128.146）
@@ -473,6 +474,16 @@ glog 默认缓冲 INFO 最长 30 s，进程被信号杀死时丢失。解决：`
 - 代价常识：`252·exp(-k(d-r))` 只在 inflation_radius 内成立；254 lethal、253 内切带、255 未知。nav2 没有"被困"检测；
   `collision_margin_distance` 是软惩罚，不是硬安全圈。
 
+#### 3.3.6 全局规划穿过地图上没扫到的灰色区域（10-15，112.70）——已改代码，10-20 部署 Orin 30524，未实机验证
+- 现象：前方被障碍挡住后，SmacPlanner2D 重规划的路线穿过 map.pgm 的未知区（灰色），而配置是 `allow_unknown: false`、`track_unknown_space: true`。
+- 证据：10-15 112.70 同一时刻 `/map` 未知格 1,406,802、空闲 190,646；`/global_costmap/costmap` 未知只剩 430,019、空闲 972,297。
+- 根因：`forbidden_map_create.cpp` 收到 `/map` 后把掩码每格填 0、只在禁行线上填 100；`KeepoutLayer::updateCosts` 照搬 nav2 KeepoutFilter 的
+  `data > old || old == NO_INFORMATION`，于是掩码的 0 把 global costmap 所有未知格写成空闲。两台机器都有这个问题。
+  local costmap 顶层 `track_unknown_space` 未设（默认 false），底色本来就是空闲，不受影响。
+- 解决：`keepout_layer.cpp` 未知格只允许被 LETHAL（掩码 100 → 254）覆盖，其余掩码值跳过。
+- 部署：10-20 随 Orin 30524 首次部署（那台还没有地图）；Thor 两台都没部署。
+- 待做：建图后核对 global costmap 未知格数与 `/map` 一致；地图边缘 / 灰色里的点位会规划失败（这是预期行为）。
+
 ### 3.4 导航与到点精度（10-03~10-06）
 
 #### 3.4.1 现象
@@ -605,7 +616,9 @@ g2p5 扩容错位，`g2p5_map.cc` 已修、单测通过，10-08 部署。还要�
   （回放视场内丢失率比噪声底高约 40 个百分点，多为 1~3 s，最长 11 s）；1.5 m 外的前方矮障碍 global 看不到。根治要把 global 的 D435 也放进 STVL。
 
 ### 4.9 112.70 没有更新
-还是 09-30 的代码，开机自启 unit 指向 src（删 src 后会起不来）。
+10-15 核对：导航配置已是 v1.0.0（`4213f93`），lightning 没有 3.2.9 的定位修复（当天定位 `NDT_SUSPECT` + 冻结、回退 7 次），src 已删。
+10-15 实测导航卡顿 / 不动（`/opt/G1/bags/replay/vel_mon_1015.jsonl`）：起步处身边 0.5 m 内有障碍，RPP 反复 `collision ahead` 清零速度；
+接近目标时 RPP 给 vx 0.05~0.09 + |wz|≥0.15，速度桥把 wz 抬到 0.6、vx 不抬，原地左右扭 11 s。未改。
 
 ### 4.10 Thor `~/.bashrc` 的 DDS 配置
 新开终端执行 `ros2` 会报参与者编号不够（2.4）。可在第 124 行加
