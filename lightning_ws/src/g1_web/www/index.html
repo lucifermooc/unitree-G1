@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>G1 控制台</title>
-<link rel="stylesheet" href="style.css?v=5">
+<link rel="stylesheet" href="style.css?v=8">
 </head>
 <body>
 <header id="topbar">
@@ -18,6 +18,7 @@
     <span class="pill" id="stConn"><i class="dot"></i><span>未连接</span></span>
     <span class="pill" title="电量">🔋 <span id="stBattery">--</span></span>
     <span class="pill" title="SLAM 状态 + 控制模式">模式 <span id="stMode">--</span></span>
+    <span class="pill lv-off" id="stLoc" title="定位一致性守护（/lightning/loc_status）"><i class="dot"></i><span>定位 --</span></span>
     <span class="pill" title="/task_status">任务 <span id="stTask">--</span></span>
     <span class="pill" title="当前地图">地图 <span id="stMap">--</span></span>
   </div>
@@ -28,6 +29,7 @@
     <canvas id="map"></canvas>
     <div id="mapHint" class="overlay hint"></div>
     <div id="mapCoord" class="overlay coord"></div>
+    <div id="mapAlert" class="overlay alert" role="alert" hidden></div>
     <div class="overlay zoom">
       <button id="btnFit" title="适应窗口">⤢</button>
       <button id="btnCenterRobot" title="居中到机器人">◎</button>
@@ -43,6 +45,7 @@
       <button data-tab="nav">导航巡逻</button>
       <button data-tab="edit">地图编辑</button>
       <button data-tab="mode">模式</button>
+      <button data-tab="health">状态</button>
     </nav>
 
     <!-- 地图管理 -->
@@ -130,6 +133,14 @@
         <button id="btnResume">继续</button>
         <button id="btnCancel" class="danger">取消</button>
       </div>
+      <div id="navFail" class="fail" role="alert" hidden></div>
+      <div class="kv">
+        <span>目标</span><b id="niGoal">--</b>
+        <span>剩余距离</span><b id="niRemain">--</b>
+        <span>指令速度</span><b id="niCmd" title="/cmd_vel：Nav2 发给桥接的速度">--</b>
+        <span>实际速度</span><b id="niOdom" title="/odom：腿式里程计">--</b>
+        <span>用时</span><b id="niTime">--</b>
+      </div>
       <h2>导航显示</h2>
       <div class="row wrap">
         <label class="check"><input type="checkbox" id="navCostmap" checked> local costmap</label>
@@ -140,6 +151,19 @@
         <span class="cm lethal"></span>障碍物 <span class="cm inscribed"></span>贴身危险带 <span class="cm inflated"></span>膨胀代价<br>
         路径：<span class="ln plan"></span>全局（/plan） <span class="ln local"></span>局部（/received_global_plan，控制器正在跟的一段）
         <span class="ln arc"></span>预测轨迹（/lookahead_collision_arc，未来约 1 秒）</p>
+      <h2>避障半径</h2>
+      <div class="kv"><span>当前</span><b id="radiusNow">--</b></div>
+      <div class="row">
+        <label for="radiusInput" class="sr">避障半径（米）</label>
+        <input id="radiusInput" type="number" min="0.40" max="0.55" step="0.01" placeholder="0.40～0.55 米">
+        <button id="btnRadiusApply" class="primary">应用</button>
+        <button id="btnRadiusRefresh" class="subtle">刷新</button>
+      </div>
+      <p id="radiusWarn" class="warn"></p>
+      <p class="note">机器人中心离障碍小于这个距离就算撞上（local / global costmap 的 robot_radius，膨胀半径自动设为半径 + 0.20）。
+        能通过的通道净宽约为 2×半径 + 0.15～0.25 米。只允许 0.40～0.55 米：再小，D435 近处盲区里的矮障碍可能来不及发现；
+        再大，窄一点的通道就过不去了。<br>
+        <b>只在本次 Nav2 运行期间有效</b>：Nav2 重启（切 localization、从 idle 切 patrol 等）后恢复为配置文件的值。</p>
       <h2>单点导航</h2>
       <div class="row">
         <label for="navPoint" class="sr">目标点位</label>
@@ -150,6 +174,14 @@
       <p class="note">按勾选顺序依次经过，走完一圈回到第一个点继续（/patrol_path）。</p>
       <ul id="patrolList" class="list compact"></ul>
       <div class="row"><button id="btnPatrolStart" class="primary">开始巡逻</button></div>
+      <h2>到点误差</h2>
+      <p class="note">单点导航成功时记"判到达"，位姿稳定 2 秒后记"站稳"；单位 cm，纵向正 = 冲过头，横向正 = 偏左。
+        <b>相对定位输出算，不是激光真值</b>：定位本身偏了这里看不出来。巡逻时后端不报每个点的到达，统计不到。</p>
+      <table id="arrivals" class="tbl"></table>
+      <p class="note" id="arrStats"></p>
+      <h2>Nav2 告警</h2>
+      <p class="note">导航模式下订阅 /rosout，只留 Nav2 相关节点的 WARN/ERROR 和恢复行为。</p>
+      <ul id="nav2Log" class="list debug"></ul>
       <p class="note">接口文档里的巡逻圈数/时长（patrol_count / patrol_duration）目前后端的 PatrolControl.srv 没有这两个字段，暂不提供。</p>
     </section>
 
@@ -203,6 +235,21 @@
       </div>
     </section>
 
+    <!-- 状态 -->
+    <section class="tab" id="tab-health" hidden>
+      <p id="healthErr" class="warn"></p>
+      <h2>数据流</h2>
+      <p class="note">"发布者"查 /rosapi；"最近收到"是本页最后收到的时间。传感器只订阅轻量话题（IMU、相机内参）来判断还在不在发，
+        而且只在打开本页时订阅——D435 停发时节点和发布者都还在，只有这里能看出来。</p>
+      <table id="topicTable" class="tbl"></table>
+      <h2>节点</h2>
+      <table id="nodeTable" class="tbl"></table>
+      <p class="note" id="healthAt"></p>
+      <h2>带宽（rosbridge → 本页）</h2>
+      <p class="note" id="bwTotal"></p>
+      <table id="bwTable" class="tbl"></table>
+    </section>
+
     <details id="logBox" open>
       <summary>操作记录</summary>
       <ol id="log"></ol>
@@ -212,6 +259,6 @@
 <div id="toast" role="status" aria-live="polite"></div>
 
 <script src="vendor/roslib.js"></script>
-<script src="app.js?v=8"></script>
+<script src="app.js?v=12"></script>
 </body>
 </html>

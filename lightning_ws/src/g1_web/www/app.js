@@ -47,6 +47,13 @@ const S = {
   patrolSel: [], semHitId: null, mappingPreview: false, semLog: [],
   costmap: null,      // {canvas, width, height, resolution, ox, oy}：导航时的 local costmap
   globalPlan: null, localPlan: null, arc: null,  // 导航时的路径，map 系 [[x, y], ...]
+  loc: null, locLevel: "",  // /lightning/loc_status 最近一条（JSON）和当前级别 ok / warn / bad
+  goal: null, navStart: 0, cmdV: null, odomV: null,  // 当前导航目标 {x, y, yaw, name}、本次任务开始时间、速度
+  arrivals: [], settle: null,  // 到点误差记录（新的在前）；正在等站稳的那一条
+  nav2Log: [], failure: null,  // Nav2 节点的告警日志；最近一次导航失败 {time, since}
+  seen: {}, bw: null,  // 每个话题最后收到的时间；带宽统计
+  health: { nodes: null, pubs: {}, busy: false },
+  radius: null, radiusBusy: false,  // 两张 costmap 的避障半径 {节点: {radius, inflation} | null}
 };
 window.app = S;  // 方便调试和自动化测试
 
@@ -75,18 +82,18 @@ function short(obj) {
 }
 
 // ---------------- rosbridge ----------------
-function call([name, type], args = {}, timeoutMs = 60000) {
+function call([name, type], args = {}, timeoutMs = 60000, quiet = false) {  // quiet：定时轮询用，不写操作记录
   return new Promise((resolve, reject) => {
     if (!S.connected) { reject(new Error("未连接机器人")); return; }
     const srv = new ROSLIB.Service({ ros: S.ros, name, serviceType: type });
     const timer = setTimeout(() => reject(new Error(`${name} 超时`)), timeoutMs);
     srv.callService(new ROSLIB.ServiceRequest(args), (res) => {
       clearTimeout(timer);
-      log(`${name} ${short(args)} → ${short(res)}`, "ok");
+      if (!quiet) log(`${name} ${short(args)} → ${short(res)}`, "ok");
       resolve(res);
     }, (err) => {
       clearTimeout(timer);
-      log(`${name} ${short(args)} ✗ ${err}`, "err");
+      if (!quiet) log(`${name} ${short(args)} ✗ ${err}`, "err");
       reject(new Error(`${name}：${err}`));
     });
   });
@@ -117,19 +124,24 @@ function connect(host) {
   S.ros.on("close", () => { setConn(false); });
   S.ros.on("error", () => { setConn(false); toast(`连不上 ${url}`); });
   S.ros.connect(url);
+  S.bw = { since: Date.now(), total: 0, topics: {}, hist: [] };
+  S.seen = {};
+  if (S.ros.socket && S.ros.socket.addEventListener) S.ros.socket.addEventListener("message", (ev) => meter(ev.data));
   log(`连接 ${url}`);
 }
 function setConn(on) {
   S.connected = on;
   $("stConn").classList.toggle("on", on);
   $("stConn").lastElementChild.textContent = on ? "已连接" : "未连接";
-  if (!on) updateNavOverlays();
+  if (!on) { updateSubs(); S.loc = null; renderLoc(); }
+  S.radius = null; renderRadius();
 }
 async function onConnected() {
   setConn(true);
   toast("已连接");
   subscribe("/base_link_pose", "geometry_msgs/msg/PoseStamped", (m) => {
     S.robot = { x: m.pose.position.x, y: m.pose.position.y, yaw: quatToYaw(m.pose.orientation) };
+    checkSettled();
     draw();
   }, { throttle_rate: 200, queue_length: 1 });
   // G1 的 battery_state_bridge：percentage 为 0~1；charge/capacity 是 NaN，充电状态看 power_supply_status。
@@ -146,15 +158,27 @@ async function onConnected() {
     document.querySelectorAll(".modes button").forEach((b) =>
       b.classList.toggle("active", b.dataset.mode === slam || b.dataset.mode === control));
     updateMappingInfo();
-    updateNavOverlays();
+    updateSubs();
+    renderLoc();
   });
   subscribe("/task_status", "aid_robot_msgs/msg/AidTaskStatus", (m) => {
+    const prev = S.task ? S.task.status : null;
     S.task = m;
+    if (m.status !== prev) onTaskStatus(prev, m);
     const text = `${TASK_TYPE[m.task_type] || m.task_type} · ${TASK_STATUS[m.status] || m.status}`;
     $("stTask").textContent = m.status === 0 ? "空闲" : text;
     $("navTask").textContent = $("stTask").textContent;
   });
+  subscribe("/lightning/loc_status", "std_msgs/msg/String", onLocStatus, { queue_length: 5 });
+  // 导航目标：网页、语义地图、ASR 发的单点目标都走 /nav_to_pose。一直订阅（很小），否则刚切导航模式时发的目标会漏掉
+  subscribe("/nav_to_pose", "geometry_msgs/msg/PoseStamped", (m) => {
+    const g = { x: m.pose.position.x, y: m.pose.position.y, yaw: quatToYaw(m.pose.orientation) };
+    const p = S.points.find((q) => Math.hypot(q.x - g.x, q.y - g.y) < 0.02);
+    S.goal = { ...g, name: p ? p.name : `(${round(g.x, 2)}, ${round(g.y, 2)})` };
+    renderNavInfo();
+  });
   subscribe("/semantic_map/debug", "std_msgs/msg/String", (m) => addSemLog([JSON.parse(m.data)]));
+  updateSubs();
   await guard(loadMaps);
   await guard(loadCurrentMap);
   await guard(loadSemLog);
@@ -506,29 +530,124 @@ async function taskControl(cmd) {
   if (!r.success) throw new Error(`${cmd} 失败：${r.message}`);
 }
 
-// 导航叠加层：导航模式（control = patrol）下订阅，离开导航模式或断线就退订并清掉。
+// ---------------- 避障半径（接口文档 3.4） ----------------
+// 两张 costmap 的 robot_radius 和 inflation_layer.inflation_radius 都支持运行时改（Nav2 动态参数），用节点自带的
+// get_parameters / set_parameters 服务。Nav2 重启后恢复 nav2_params.yaml 的值，所以导航页打开时每 5 秒读一次。
+const RADIUS = { min: 0.40, max: 0.55, pad: 0.20,  // 膨胀半径 = 半径 + 0.20（与 nav2_params.yaml 的约定一致）
+  nodes: ["/local_costmap/local_costmap", "/global_costmap/global_costmap"],
+  names: ["robot_radius", "inflation_layer.inflation_radius"] };
+const PARAM_DOUBLE = 3;  // rcl_interfaces/msg/ParameterType
+function radiusError(r) {
+  if (!Number.isFinite(r)) return "请输入数字";
+  if (r < RADIUS.min - 1e-9 || r > RADIUS.max + 1e-9) return `只允许 ${RADIUS.min.toFixed(2)}～${RADIUS.max.toFixed(2)} 米`;
+  return "";
+}
+async function loadRadius(quiet = true) {
+  if (S.radiusBusy || !S.connected) return;
+  if (!inLoc()) {  // 不在定位模式时 Nav2 一定没跑，不去调不存在的服务
+    S.radius = Object.fromEntries(RADIUS.nodes.map((n) => [n, null]));
+    renderRadius();
+    return;
+  }
+  S.radiusBusy = true;
+  try {
+    const out = {};
+    for (const node of RADIUS.nodes) {
+      try {
+        const r = await call([`${node}/get_parameters`, "rcl_interfaces/srv/GetParameters"], { names: RADIUS.names }, 5000, quiet);
+        const [rad, infl] = r.values.map((v) => (v.type === PARAM_DOUBLE ? v.double_value : null));
+        out[node] = rad === null ? null : { radius: rad, inflation: infl };
+      } catch (e) { out[node] = null; }  // Nav2 没在运行时服务不存在
+    }
+    S.radius = out;
+  } finally { S.radiusBusy = false; }
+  renderRadius();
+}
+function renderRadius() {
+  const el = $("radiusNow"), vals = S.radius ? RADIUS.nodes.map((n) => S.radius[n]) : [];
+  let text = "--", bad = false;
+  if (!S.connected) text = "--";
+  else if (!S.radius) text = "读取中…";
+  else if (vals.every((v) => !v)) { text = "读不到（Nav2 没在运行，需要定位模式）"; bad = true; }
+  else if (vals.some((v) => !v) || vals[0].radius !== vals[1].radius || vals[0].inflation !== vals[1].inflation) {
+    const f = (v) => (v ? `${v.radius.toFixed(2)}（膨胀 ${v.inflation === null ? "?" : v.inflation.toFixed(2)}）` : "读不到");
+    text = `local ${f(vals[0])} / global ${f(vals[1])}：两张图不一致，请重新应用一次`; bad = true;
+  } else {
+    const { radius: r, inflation: i } = vals[0];
+    text = `${r.toFixed(2)} 米（膨胀 ${i === null ? "?" : i.toFixed(2)} 米，通道净宽约需 ${(2 * r + 0.15).toFixed(2)}～${(2 * r + 0.25).toFixed(2)} 米）`;
+    if ($("radiusInput").value === "" && document.activeElement !== $("radiusInput")) $("radiusInput").value = r.toFixed(2);
+  }
+  el.textContent = text;
+  el.classList.toggle("bad", bad);
+  checkRadiusInput();
+}
+function checkRadiusInput() {
+  const s = $("radiusInput").value.trim(), err = s === "" ? "" : radiusError(Number(s));
+  $("radiusWarn").textContent = err;
+  $("btnRadiusApply").disabled = !S.connected || s === "" || !!err;
+}
+async function applyRadius() {
+  const r = Number($("radiusInput").value);
+  const err = radiusError(r);
+  if (err) throw new Error(`避障半径${err}`);
+  const v = round(r, 2), infl = round(v + RADIUS.pad, 2);
+  for (const node of RADIUS.nodes) {
+    // 先改膨胀再改半径：在允许范围内，新膨胀半径总不小于新旧两个半径，中途不会出现"膨胀 < 半径"
+    const res = await call([`${node}/set_parameters`, "rcl_interfaces/srv/SetParameters"], { parameters: [
+      { name: "inflation_layer.inflation_radius", value: { type: PARAM_DOUBLE, double_value: infl } },
+      { name: "robot_radius", value: { type: PARAM_DOUBLE, double_value: v } },
+    ] }, 10000);
+    const bad = res.results.find((x) => !x.successful);
+    if (bad) throw new Error(`${node} 设置失败：${bad.reason || "未知原因"}`);
+  }
+  toast(`避障半径已设为 ${v.toFixed(2)} 米`);
+  await loadRadius(false);
+}
+
+// ---------------- 按条件订阅 ----------------
+// want() 为真时订阅，为假时退订并调 off() 清掉数据。模式、连接、勾选框、标签页变化时调 updateSubs()。
 // local costmap 是 map 系的滚动窗口（6×6 m、0.05 m），值已被 nav2 换成 0~100：100 致命、99 内切带、1~98 膨胀、-1 未知。
-// 路径：/plan 是 SmacPlanner2D 的全局路径（BT 1 Hz 重规划，没有平滑器，控制器直接跟它）；
+// 路径：/plan 是 SmacPlanner2D 的全局路径（BT 1 Hz 重规划，没有平滑器，控制器直接跟它；剩余距离也用它算，所以导航时一直订阅）；
 // /received_global_plan 是 RPP 实际在跟的那一段（裁到 costmap 范围内）；/lookahead_collision_arc 是 RPP 按当前速度预测的未来轨迹。
-const NAV_OVERLAYS = [
-  { topic: "/local_costmap/costmap", type: "nav_msgs/msg/OccupancyGrid", box: "navCostmap", key: "costmap",
-    conv: costmapImage, opts: { throttle_rate: 500, queue_length: 1, compression: "cbor" } },  // CBOR 下 int8[] 直接是 Int8Array
-  { topic: "/plan", type: "nav_msgs/msg/Path", box: "navPaths", key: "globalPlan", conv: pathPoints,
-    opts: { throttle_rate: 500, queue_length: 1 } },
-  { topic: "/received_global_plan", type: "nav_msgs/msg/Path", box: "navPaths", key: "localPlan", conv: pathPoints,
+const inNav = () => S.robotStatus.split("+")[1] === "patrol";
+const inLoc = () => S.robotStatus.split("+")[0] === "localization";
+const healthOpen = () => S.tab === "health";
+const SUBS = [
+  { topic: "/local_costmap/costmap", type: "nav_msgs/msg/OccupancyGrid", want: () => inNav() && $("navCostmap").checked,
+    on: (m) => { S.costmap = costmapImage(m); draw(); }, off: () => { S.costmap = null; },
+    opts: { throttle_rate: 500, queue_length: 1, compression: "cbor" } },  // CBOR 下 int8[] 直接是 Int8Array
+  { topic: "/plan", type: "nav_msgs/msg/Path", want: inNav,
+    on: (m) => { S.globalPlan = pathPoints(m); renderNavInfo(); draw(); }, off: () => { S.globalPlan = null; },
+    opts: { throttle_rate: 500, queue_length: 1, compression: "cbor" } },
+  { topic: "/received_global_plan", type: "nav_msgs/msg/Path", want: () => inNav() && $("navPaths").checked,
+    on: (m) => { S.localPlan = pathPoints(m); draw(); }, off: () => { S.localPlan = null; },
+    opts: { throttle_rate: 500, queue_length: 1, compression: "cbor" } },
+  { topic: "/lookahead_collision_arc", type: "nav_msgs/msg/Path", want: () => inNav() && $("navPaths").checked,
+    on: (m) => { S.arc = pathPoints(m); draw(); }, off: () => { S.arc = null; },
+    opts: { throttle_rate: 200, queue_length: 1, compression: "cbor" } },
+  // collision_monitor 没开时桥接直接吃 /cmd_vel（机器人上没有 /cmd_vel_safe）；实际速度看腿式里程计
+  { topic: "/cmd_vel", type: "geometry_msgs/msg/Twist", want: inNav,
+    on: (m) => { S.cmdV = { vx: m.linear.x, wz: m.angular.z, t: Date.now() }; }, off: () => { S.cmdV = null; },
     opts: { throttle_rate: 200, queue_length: 1 } },
-  { topic: "/lookahead_collision_arc", type: "nav_msgs/msg/Path", box: "navPaths", key: "arc", conv: pathPoints,
-    opts: { throttle_rate: 200, queue_length: 1 } },
+  { topic: "/odom", type: "nav_msgs/msg/Odometry", want: inNav,
+    on: (m) => { S.odomV = { vx: m.twist.twist.linear.x, vy: m.twist.twist.linear.y, wz: m.twist.twist.angular.z, t: Date.now() }; },
+    off: () => { S.odomV = null; }, opts: { throttle_rate: 200, queue_length: 1, compression: "cbor" } },
+  // 日志不能节流（会丢），queue 放大一点；只留 Nav2 相关节点的告警，见 onRosout
+  { topic: "/rosout", type: "rcl_interfaces/msg/Log", want: inNav, on: onRosout, opts: { queue_length: 100 } },
+  // 状态页：传感器只订阅轻量话题判断"还在不在发"（D435 停发时节点和发布者都还在，只能看数据）
+  { topic: "/livox/imu", type: "sensor_msgs/msg/Imu", want: healthOpen, on: () => {}, opts: { throttle_rate: 1000, queue_length: 1 } },
+  { topic: "/camera/camera/depth/camera_info", type: "sensor_msgs/msg/CameraInfo", want: healthOpen, on: () => {},
+    opts: { throttle_rate: 1000, queue_length: 1, compression: "cbor" } },
 ];
-function updateNavOverlays() {
-  const nav = S.connected && S.robotStatus.split("+")[1] === "patrol";
-  for (const o of NAV_OVERLAYS) {
-    const want = nav && $(o.box).checked, t = topics[o.topic];
+function updateSubs() {
+  for (const o of SUBS) {
+    const want = S.connected && o.want(), t = topics[o.topic];
     if (want && (!t || t.ros !== S.ros)) {  // 重连后旧连接上的订阅已失效，要重订
-      subscribe(o.topic, o.type, (m) => { S[o.key] = o.conv(m); draw(); }, o.opts);
-    } else if (!want && (t || S[o.key])) {
+      subscribe(o.topic, o.type, o.on, o.opts);
+    } else if (!want && t) {
       unsubscribe(o.topic);
-      S[o.key] = null; draw();
+      if (o.off) o.off();
+      draw();
     }
   }
 }
@@ -558,6 +677,365 @@ function costmapImage(grid) {
   cctx.putImageData(img, 0, 0);
   return { canvas: c, width, height, resolution, ox: grid.info.origin.position.x, oy: grid.info.origin.position.y };
 }
+
+// ---------------- 定位状态（/lightning/loc_status） ----------------
+// lightning 的一致性守护每次激光定位（只在 LIO 关键帧）后发一条 JSON，机器人不动时可能很久不更新，所以不按"多久没收到"判异常。
+function onLocStatus(m) {
+  try { S.loc = JSON.parse(m.data); } catch (e) { return; }
+  S.loc.recvAt = Date.now();
+  renderLoc();
+}
+function locLevel(st) {
+  if (st.need_reloc) return ["bad", "需要重定位"];
+  if (st.frozen) return ["warn", "守护冻结"];
+  if (st.state === "NDT_SUSPECT") return ["warn", "地图匹配可疑"];
+  if (st.state === "LIO_SUSPECT") return ["warn", "LIO 可疑"];
+  if (st.state !== "GOOD") return ["warn", st.state];
+  if (!st.loc_valid) return ["warn", "激光定位无效"];
+  return ["ok", "正常"];
+}
+function renderLoc() {
+  const pill = $("stLoc"), text = pill.lastElementChild;
+  let level = "off", label = "--", title = "定位一致性守护（/lightning/loc_status）";
+  if (S.connected && inLoc()) {
+    if (!S.loc) { label = "等待数据"; title += "：还没收到（只在 LIO 关键帧发布，机器人走动后才会有）"; }
+    else {
+      const st = S.loc;
+      [level, label] = locLevel(st);
+      const age = Math.round((Date.now() - st.recvAt) / 1000);
+      title += `\n状态 ${st.state}${st.frozen ? "（冻结：只跟 LIO，不信地图匹配）" : ""}${st.need_reloc ? "，需要重定位" : ""}` +
+        `\n输出相对 LIO 漂移 ${st.drift_m.toFixed(3)} m / ${st.drift_deg.toFixed(2)}°` +
+        `\nNDT 残差 ${st.ndt_residual_m.toFixed(3)} m / ${st.ndt_residual_deg.toFixed(2)}°，分值 ${st.score.toFixed(2)}` +
+        `\n回退 ${st.rollbacks} 次（上次 ${st.last_rollback_m.toFixed(2)} m），腿式里程计${st.odom_online ? "在线" : "离线"}` +
+        `\n${age} 秒前更新`;
+    }
+  }
+  pill.className = `pill lv-${level}`;
+  text.textContent = `定位 ${label}`;
+  pill.title = title;
+  if (level === "bad" && S.locLevel !== "bad") {
+    toast("⚠ 定位需要重定位：守护长时间冻结，当前位置可能不准");
+    log("定位守护：NEED RELOC", "err");
+  } else if (level === "warn" && S.locLevel === "ok") log(`定位守护：${label}`, "err");
+  else if (level === "ok" && (S.locLevel === "warn" || S.locLevel === "bad")) log("定位守护：恢复正常", "ok");
+  S.locLevel = level;
+  $("mapAlert").hidden = level !== "bad";
+  $("mapAlert").textContent = level === "bad"
+    ? "⚠ 定位需要重定位（守护冻结太久）。先暂停导航，到“模式”里在地图上拖动设置位姿。" : "";
+}
+
+// ---------------- 导航信息 / 到点误差 ----------------
+const wrapAngle = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+function goalError(p, g) {  // 按目标朝向拆成纵向（沿目标朝向，正 = 冲过头）和横向（正 = 偏左）
+  const dx = p.x - g.x, dy = p.y - g.y, c = Math.cos(g.yaw), s = Math.sin(g.yaw);
+  return { dist: Math.hypot(dx, dy), along: c * dx + s * dy, lateral: -s * dx + c * dy, yaw: wrapAngle(p.yaw - g.yaw) };
+}
+function onTaskStatus(prev, m) {
+  const running = (st) => st === 1 || st === 4;
+  if (m.status === 1 && !running(prev)) {  // 新任务开始
+    S.navStart = Date.now(); S.failure = null; S.settle = null; renderFail();
+  }
+  // 单点导航"成功"时记一次（判到达），之后等位姿稳定再记一次（站稳）。巡逻时后端每到一个点不发成功，统计不到
+  if (m.status === 2 && prev === 1 && m.task_type === 0 && S.goal && S.robot) {
+    const e = { time: Date.now(), goal: S.goal, judged: goalError(S.robot, S.goal), settled: null,
+      dur: S.navStart ? (Date.now() - S.navStart) / 1000 : null };
+    S.arrivals.unshift(e); S.arrivals.length = Math.min(S.arrivals.length, 10);
+    S.settle = { e, hist: [] };
+    renderArrivals();
+  }
+  if (m.status === 3 && prev !== 3) {
+    S.failure = { time: Date.now(), since: S.navStart || Date.now() - 60000 };
+    renderFail();
+    const f = failureHints()[0];
+    toast(`导航失败${f ? "：" + f : ""}`);
+  }
+  renderNavInfo();
+}
+function checkSettled() {  // 位姿 2 秒内变化 <1 cm、<0.5° 算站稳；20 秒还不稳就按当时的位置记，并标出来
+  const st = S.settle;
+  if (!st || !S.robot) return;
+  const now = Date.now();
+  st.hist.push({ t: now, ...S.robot });
+  st.hist = st.hist.filter((h) => now - h.t <= 2000);
+  const still = now - st.hist[0].t >= 1800 && st.hist.every((h) =>
+    Math.hypot(h.x - S.robot.x, h.y - S.robot.y) < 0.01 && Math.abs(wrapAngle(h.yaw - S.robot.yaw)) < 0.0087);
+  if (still || now - st.e.time > 20000) {
+    st.e.settled = goalError(S.robot, st.e.goal);
+    st.e.unstable = !still;
+    S.settle = null;
+    renderArrivals();
+  }
+}
+function planRemaining() {  // 沿 /plan 从离机器人最近的点算到终点
+  const pl = S.globalPlan, r = S.robot;
+  if (!pl || pl.length < 2 || !r) return null;
+  let bi = 0, bd = Infinity;
+  pl.forEach(([x, y], i) => { const d = Math.hypot(x - r.x, y - r.y); if (d < bd) { bd = d; bi = i; } });
+  let sum = bd;
+  for (let i = bi; i < pl.length - 1; i++) sum += Math.hypot(pl[i + 1][0] - pl[i][0], pl[i + 1][1] - pl[i][1]);
+  return sum;
+}
+function renderNavInfo() {
+  const running = S.task && (S.task.status === 1 || S.task.status === 4);
+  const g = S.goal;
+  $("niGoal").textContent = g ? `${g.name}  ${deg(g.yaw)}°` : "--";
+  const rem = running ? planRemaining() : null;
+  const straight = g && S.robot ? Math.hypot(g.x - S.robot.x, g.y - S.robot.y) : null;
+  $("niRemain").textContent = rem != null ? `${rem.toFixed(2)} m（直线 ${straight != null ? straight.toFixed(2) : "--"} m）`
+    : straight != null && running ? `直线 ${straight.toFixed(2)} m` : "--";
+  const fresh = (v) => v && Date.now() - v.t < 1500;
+  $("niCmd").textContent = fresh(S.cmdV) ? `${S.cmdV.vx.toFixed(2)} m/s，${S.cmdV.wz.toFixed(2)} rad/s` : "--";
+  $("niOdom").textContent = fresh(S.odomV)
+    ? `${S.odomV.vx.toFixed(2)} m/s${Math.abs(S.odomV.vy) >= 0.02 ? `（横移 ${S.odomV.vy.toFixed(2)}）` : ""}，${S.odomV.wz.toFixed(2)} rad/s` : "--";
+  $("niTime").textContent = running && S.navStart ? `${Math.round((Date.now() - S.navStart) / 1000)} s` : "--";
+}
+const cm = (v) => `${(v * 100).toFixed(1)}`;
+function renderArrivals() {
+  const t = $("arrivals");
+  t.innerHTML = "<tr><th>时间</th><th>目标</th><th>判到达</th><th>站稳</th><th>纵向</th><th>横向</th><th>航向</th><th>用时</th></tr>";
+  for (const e of S.arrivals) {
+    const tr = t.insertRow(), s = e.settled;
+    const cells = [new Date(e.time).toLocaleTimeString(), e.goal.name, `${cm(e.judged.dist)}`,
+      s ? `${cm(s.dist)}${e.unstable ? "?" : ""}` : "等站稳…", s ? cm(s.along) : "", s ? cm(s.lateral) : "",
+      s ? `${(s.yaw * 180 / Math.PI).toFixed(1)}°` : "", e.dur != null ? `${Math.round(e.dur)} s` : ""];
+    for (const c of cells) tr.insertCell().textContent = c;
+    if (e.unstable) tr.title = "20 秒内没站稳，按 20 秒时的位置记";
+  }
+  if (!S.arrivals.length) { const c = t.insertRow().insertCell(); c.colSpan = 8; c.textContent = "还没有记录（单点导航成功后自动记录）"; }
+  const done = S.arrivals.filter((e) => e.settled).map((e) => e.settled);
+  $("arrStats").textContent = done.length
+    ? `站稳误差 ${done.length} 次：平均 ${cm(done.reduce((a, s) => a + s.dist, 0) / done.length)} cm，` +
+      `最大 ${cm(Math.max(...done.map((s) => s.dist)))} cm；航向最大 ${Math.max(...done.map((s) => Math.abs(s.yaw) * 180 / Math.PI)).toFixed(1)}°`
+    : "";
+}
+
+// ---------------- Nav2 告警 / 失败原因（/rosout） ----------------
+const NAV2_NODE = /^(bt_navigator|controller_server|planner_server|behavior_server|smoother_server|velocity_smoother|local_costmap|global_costmap|lifecycle_manager_navigation|waypoint_manage|g1_cmdvel_to_sport|collision_monitor)/;
+// 常见 Nav2 日志 → 中文说明。按顺序匹配，取第一个
+const NAV2_HINTS = [
+  [/collision ahead|detected collision/i, "RPP 预测前方 1 秒内会撞上障碍物，停车"],
+  [/failed to make progress/i, "控制器判定长时间没有前进（被挡住、卡住或速度太低）"],
+  [/start occupied|start.*(lethal|in collision)|robot is out of bounds|starting point.*(occupied|lethal)/i, "起点在障碍物里（机器人被 costmap 包住了，看 local/global costmap）"],
+  [/goal.*(occupied|lethal|in collision)/i, "目标点在障碍物上"],
+  [/out of bounds|outside.*map|goal coordinates/i, "目标或起点在地图范围外"],
+  [/failed to (create|compute) (a )?plan|no valid path|failed to plan|exceeded maximum iterations|planning algorithm/i, "全局规划失败（目标被障碍物或禁行区隔开，或在障碍里）"],
+  [/goal.*rejected|rejected.*goal/i, "导航目标被拒绝"],
+  [/transform|extrapolat|tf .*timeout|lookup.*(would require|into the future|past)/i, "TF 超时或太旧（定位或传感器延迟）"],
+  [/costmap.*(not current|timed out|timeout)|sensor origin|no current/i, "costmap 数据过时（传感器数据没按时到）"],
+  [/running (spin|wait|backup|clear|drive)|clearing.*costmap|clear.*costmap/i, "触发了恢复行为（原地转 / 等待 / 清图）"],
+  [/no.*controller|controller.*(exception|failed)|failed to compute.*velocity|computevelocitycommands/i, "控制器算不出速度"],
+  [/aborting|aborted|goal failed|navigation failed/i, "导航被中止"],
+];
+const nav2Hint = (msg) => { const h = NAV2_HINTS.find(([re]) => re.test(msg)); return h ? h[1] : ""; };
+function onRosout(m) {
+  if (!NAV2_NODE.test(m.name)) return;
+  if (m.level < 30 && !/^behavior_server/.test(m.name)) return;  // WARN 以上；恢复行为（behavior_server）的 INFO 也留着
+  const now = Date.now(), last = S.nav2Log[S.nav2Log.length - 1];
+  if (last && last.name === m.name && last.msg === m.msg && now - last.time < 10000) { last.count++; last.time = now; }
+  else S.nav2Log.push({ time: now, first: now, level: m.level, name: m.name, msg: m.msg, count: 1 });
+  if (S.nav2Log.length > 60) S.nav2Log.splice(0, S.nav2Log.length - 60);
+  renderNav2Log();
+  if (S.failure && now - S.failure.time < 5000) renderFail();  // 日志可能比 /task_status 晚到一点
+}
+function failureLines() {
+  const f = S.failure;
+  return f ? S.nav2Log.filter((l) => l.time >= f.since - 1000 && l.first <= f.time + 5000) : [];
+}
+function failureHints() {
+  return [...new Set(failureLines().slice().reverse().map((l) => nav2Hint(l.msg)).filter(Boolean))];
+}
+function renderFail() {
+  const box = $("navFail"), f = S.failure;
+  box.hidden = !f;
+  if (!f) return;
+  box.innerHTML = "";
+  const h = document.createElement("div"); h.className = "t";
+  h.textContent = `导航失败（${new Date(f.time).toLocaleTimeString()}）`;
+  box.appendChild(h);
+  const hints = failureHints(), lines = failureLines().slice(-8);
+  for (const t of hints) { const d = document.createElement("div"); d.textContent = `• ${t}`; box.appendChild(d); }
+  if (!lines.length) {
+    const d = document.createElement("div"); d.className = "s";
+    d.textContent = "这次任务期间没收到 Nav2 的告警日志：可能是目标被拒绝、导航还没起来，或者是后端（waypoint_manage）的问题，看下面的操作记录。";
+    box.appendChild(d);
+  }
+  for (const l of lines) box.appendChild(nav2LogNode(l));
+}
+function nav2LogNode(l) {
+  const d = document.createElement("div"); d.className = `s lv${l.level}`;
+  d.textContent = `${new Date(l.time).toLocaleTimeString()} [${l.name}] ${l.msg}${l.count > 1 ? `（×${l.count}）` : ""}`;
+  return d;
+}
+function renderNav2Log() {
+  const ul = $("nav2Log"); ul.innerHTML = "";
+  for (const l of S.nav2Log.slice(-12).reverse()) {
+    const li = document.createElement("li");
+    li.appendChild(nav2LogNode(l));
+    const hint = nav2Hint(l.msg);
+    if (hint) { const d = document.createElement("div"); d.className = "hint"; d.textContent = `→ ${hint}`; li.appendChild(d); }
+    ul.appendChild(li);
+  }
+  if (!ul.children.length) ul.innerHTML = '<li class="meta">导航模式下 Nav2 的告警会显示在这里</li>';
+}
+
+// ---------------- 带宽统计 ----------------
+// 统计 rosbridge 发到本页的每一条消息：JSON 按字符数（基本都是 ASCII）、CBOR 按字节数，按话题分类。
+// 顺带记下每个话题最后收到的时间（状态页的"最近收到"）。
+function jsonTopic(s) {
+  const m = /"(topic|service)"\s*:\s*"([^"]+)"/.exec(s.slice(0, 400));
+  if (m) return m[1] === "service" ? `服务 ${m[2]}` : m[2];
+  return /"op"\s*:\s*"png"/.test(s.slice(0, 40)) ? "png 压缩（建图预览）" : "其他";
+}
+function cborTopic(u8) {  // CBOR map 里找键 "topic"（0x65 + 5 字节），后面是一个短文本串
+  const n = Math.min(u8.length - 8, 80);
+  for (let i = 0; i < n; i++) {
+    if (u8[i] === 0x65 && u8[i + 1] === 0x74 && u8[i + 2] === 0x6f && u8[i + 3] === 0x70 && u8[i + 4] === 0x69 && u8[i + 5] === 0x63) {
+      let j = i + 6, len = u8[j] - 0x60;
+      if (u8[j] === 0x78) { len = u8[j + 1]; j++; } else if (len < 0 || len > 23) return "其他（CBOR）";
+      return String.fromCharCode(...u8.subarray(j + 1, j + 1 + len));
+    }
+  }
+  return "其他（CBOR）";
+}
+function meter(data) {
+  if (!S.bw) return;
+  let bytes = 0, topic = "其他";
+  if (typeof data === "string") { bytes = data.length; topic = jsonTopic(data); }
+  else if (data instanceof ArrayBuffer) { bytes = data.byteLength; topic = cborTopic(new Uint8Array(data)); }
+  else if (data && data.size != null) { bytes = data.size; }
+  const t = S.bw.topics[topic] || (S.bw.topics[topic] = { bytes: 0, msgs: 0 });
+  t.bytes += bytes; t.msgs++; S.bw.total += bytes;
+  S.seen[topic] = Date.now();
+}
+function bwSample() {  // 每秒记一次累计值，速率按最近 5 秒算
+  if (!S.bw) return;
+  const snap = { t: Date.now(), total: S.bw.total, topics: {} };
+  for (const [k, v] of Object.entries(S.bw.topics)) snap.topics[k] = { bytes: v.bytes, msgs: v.msgs };
+  S.bw.hist.push(snap);
+  if (S.bw.hist.length > 6) S.bw.hist.shift();
+}
+function bwRates() {
+  const h = S.bw && S.bw.hist;
+  if (!h || h.length < 2) return null;
+  const a = h[0], b = h[h.length - 1], dt = (b.t - a.t) / 1000;
+  const topics = Object.entries(b.topics).map(([k, v]) => {
+    const o = a.topics[k] || { bytes: 0, msgs: 0 };
+    return { topic: k, kbps: (v.bytes - o.bytes) / 1024 / dt, hz: (v.msgs - o.msgs) / dt, total: v.bytes };
+  }).sort((x, y) => y.kbps - x.kbps || y.total - x.total);
+  return { kbps: (b.total - a.total) / 1024 / dt, topics };
+}
+
+// ---------------- 状态页：节点 / 数据流 / 带宽 ----------------
+// 节点按启动它的 launch 分组：常驻 = robot.launch.py + 语义地图服务；定位 = lightning；导航 = g1_navigation.launch.py
+const NODE_GROUPS = [
+  { name: "常驻", want: () => true, nodes: ["/rosbridge_websocket", "/rosapi", "/robot_status_manager_node", "/launch_manager_node",
+    "/map_manager_node", "/waypoint_manage_node", "/robot_pose_pub_node", "/livox_lidar_publisher", "/camera/camera", "/point_filter",
+    "/g1_robot_state_publisher", "/g1_battery_state_bridge", "/semantic_map_server"] },
+  { name: "定位", want: inLoc, nodes: ["/lightning_slam"] },
+  { name: "导航", want: inNav, nodes: ["/planner_server", "/controller_server", "/bt_navigator", "/behavior_server",
+    "/velocity_smoother", "/local_costmap/local_costmap", "/global_costmap/global_costmap", "/lifecycle_manager_navigation",
+    "/g1_cmdvel_to_sport", "/g1_sport_to_odom", "/scan_range_filter", "/d435_mark_filter"] },
+];
+// sub：本页有没有订阅它（订阅了才有"最近收到"）
+const TOPIC_CHECKS = [
+  { topic: "/livox/lidar", label: "MID360 点云", want: () => true },
+  { topic: "/livox/imu", label: "MID360 IMU", want: () => true, sub: true },
+  { topic: "/camera/camera/depth/color/points", label: "D435 点云", want: () => true },
+  { topic: "/camera/camera/depth/camera_info", label: "D435 深度流", want: () => true, sub: true },
+  { topic: "/lightning/registered_scan", label: "LIO 单帧", want: inLoc },
+  { topic: "/base_link_pose", label: "定位位姿", want: () => true, sub: true },
+  { topic: "/lightning/loc_status", label: "定位守护", tip: "只在 LIO 关键帧发布，机器人不动时可能很久不更新", want: inLoc, sub: true, slow: true },
+  { topic: "/battery_state", label: "电池", want: () => true, sub: true },
+  { topic: "/odom", label: "腿式里程计", want: inNav, sub: true },
+  { topic: "/local_costmap/costmap", label: "local costmap", want: () => inNav() && $("navCostmap").checked, sub: true },
+  { topic: "/cmd_vel", label: "速度指令", tip: "Nav2 在跑任务时才发", want: inNav, sub: true, slow: true },
+];
+async function refreshHealth() {
+  if (!S.connected || S.health.busy) return;
+  S.health.busy = true;
+  try {
+    const r = await call(["/rosapi/nodes", "rosapi_msgs/srv/Nodes"], {}, 5000, true);
+    S.health.nodes = new Set(r.nodes || []);
+    await Promise.all(TOPIC_CHECKS.map(async (c) => {
+      const p = await call(["/rosapi/publishers", "rosapi_msgs/srv/Publishers"], { topic: c.topic }, 5000, true).catch(() => null);
+      S.health.pubs[c.topic] = p ? (p.publishers || []).length : null;
+    }));
+    S.health.at = Date.now(); S.health.err = "";
+  } catch (e) {
+    S.health.err = `rosapi 查询失败：${e.message}`;
+  } finally { S.health.busy = false; }
+  renderHealth();
+}
+function ageText(t) {
+  if (!t) return ["—", ""];
+  const a = (Date.now() - t) / 1000;
+  return [a < 1.5 ? "刚刚" : `${Math.round(a)} 秒前`, a < 3 ? "ok" : a < 10 ? "warn" : "bad"];
+}
+function renderHealth() {
+  if (S.tab !== "health") return;
+  const H = S.health;
+  $("healthErr").textContent = !S.connected ? "未连接机器人" : H.err || "";
+  // 数据流
+  const tt = $("topicTable");
+  tt.innerHTML = "<tr><th>数据</th><th>话题</th><th>发布者</th><th>最近收到</th></tr>";
+  for (const c of TOPIC_CHECKS) {
+    const need = c.want(), tr = tt.insertRow(), pubs = H.pubs[c.topic];
+    tr.className = need ? "" : "dim";
+    const lc = tr.insertCell(); lc.textContent = c.label + (c.tip ? " ⓘ" : ""); lc.title = c.tip || "";
+    tr.insertCell().textContent = c.topic;
+    const pc = tr.insertCell();
+    pc.textContent = pubs == null ? "?" : pubs;
+    if (need && pubs === 0) pc.className = "bad";
+    const ac = tr.insertCell();
+    if (c.sub) {
+      const [txt, lv] = ageText(S.seen[c.topic]);
+      ac.textContent = txt;
+      if (need && !c.slow) ac.className = lv || (pubs > 0 ? "bad" : "");
+    } else { ac.textContent = "不订阅"; ac.title = "数据量大，不经 rosbridge 订阅，只查发布者"; }
+  }
+  // 节点
+  const nt = $("nodeTable");
+  nt.innerHTML = "";
+  if (H.nodes) {
+    for (const g of NODE_GROUPS) {
+      const need = g.want(), missing = g.nodes.filter((n) => !H.nodes.has(n));
+      const tr = nt.insertRow(); tr.className = need ? "" : "dim";
+      tr.insertCell().textContent = `${g.name}${need ? "" : "（当前模式不需要）"}`;
+      const c = tr.insertCell();
+      c.textContent = missing.length ? `缺 ${missing.length} 个：${missing.join("  ")}` : `${g.nodes.length} 个都在`;
+      if (need) c.className = missing.length ? "bad" : "ok";
+    }
+    const known = new Set(NODE_GROUPS.flatMap((g) => g.nodes));
+    const others = [...H.nodes].filter((n) => !known.has(n) && !/^\/(_|transform_listener_impl|launch_ros)/.test(n));
+    const tr = nt.insertRow(); tr.className = "dim";
+    tr.insertCell().textContent = "其他";
+    tr.insertCell().textContent = others.join("  ") || "无";
+  }
+  $("healthAt").textContent = H.at ? `节点和发布者 ${new Date(H.at).toLocaleTimeString()} 查询（每 3 秒）` : "";
+  // 带宽
+  const r = bwRates(), bt = $("bwTable");
+  $("bwTotal").textContent = r
+    ? `下行 ${r.kbps.toFixed(1)} KB/s（最近 5 秒平均），连接以来共 ${(S.bw.total / 1048576).toFixed(2)} MB / ${Math.round((Date.now() - S.bw.since) / 1000)} s`
+    : "统计中…";
+  bt.innerHTML = "<tr><th>话题</th><th>KB/s</th><th>条/秒</th><th>累计</th></tr>";
+  for (const t of r ? r.topics : []) {
+    const tr = bt.insertRow();
+    tr.insertCell().textContent = t.topic;
+    tr.insertCell().textContent = t.kbps.toFixed(1);
+    tr.insertCell().textContent = t.hz.toFixed(1);
+    tr.insertCell().textContent = t.total > 1048576 ? `${(t.total / 1048576).toFixed(1)} MB` : `${(t.total / 1024).toFixed(0)} KB`;
+  }
+}
+
+// 每秒：带宽采样、导航信息（速度、用时）、定位标签的"几秒前"、状态页
+let tickN = 0;
+setInterval(() => {
+  tickN++;
+  bwSample();
+  if (S.tab === "nav") { renderNavInfo(); if (tickN % 5 === 0) loadRadius(); }
+  if (S.loc) renderLoc();
+  if (S.tab === "health") { renderHealth(); if (tickN % 3 === 0) refreshHealth(); }
+}, 1000);
 
 // ---------------- 语义地图 ----------------
 function renderSemantic(res) {
@@ -779,7 +1257,7 @@ function draw() {
     ctx.strokeStyle = css("--muted"); ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
     ctx.strokeRect(a, b, cm.width * k, cm.height * k); ctx.setLineDash([]);
   }
-  if (!S.mappingPreview) {  // 规划路径：全局在下，局部和预测轨迹叠在上面
+  if (!S.mappingPreview && $("navPaths").checked) {  // 规划路径：全局在下，局部和预测轨迹叠在上面
     polyline(S.globalPlan, css("--plan"), 3, [8, 5]);
     polyline(S.localPlan, css("--local-plan"), 3);
     polyline(S.arc, css("--arc"), 4);
@@ -922,6 +1400,9 @@ function setTab(tab) {
   document.querySelectorAll("#tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
   document.querySelectorAll(".tab").forEach((s) => { s.hidden = s.id !== `tab-${tab}`; });
   setTool(tab === "points" ? "point" : null);
+  updateSubs();
+  if (tab === "health") { renderHealth(); guard(refreshHealth); }
+  if (tab === "nav") loadRadius();
 }
 function renderAll() { renderPoints(); fillPointForm(); renderNogo(); draw(); }
 
@@ -962,7 +1443,11 @@ $("btnPause").onclick = () => guard(() => taskControl("pause"));
 $("btnResume").onclick = () => guard(() => taskControl("resume"));
 $("btnCancel").onclick = () => guard(() => taskControl("cancel"));
 $("btnPatrolStart").onclick = () => guard(startPatrol);
-$("navCostmap").onchange = $("navPaths").onchange = updateNavOverlays;
+$("navCostmap").onchange = $("navPaths").onchange = () => { updateSubs(); draw(); };
+$("radiusInput").addEventListener("input", checkRadiusInput);
+$("radiusInput").addEventListener("keydown", (e) => { if (e.key === "Enter" && !$("btnRadiusApply").disabled) guard(applyRadius); });
+$("btnRadiusApply").onclick = () => guard(applyRadius);
+$("btnRadiusRefresh").onclick = () => guard(() => loadRadius(false));
 $("btnNogoDraw").onclick = () => setTool(S.tool === "nogo" ? null : "nogo");
 $("btnNogoSave").onclick = () => guard(saveNogo);
 $("btnEraser").onclick = () => setTool(S.tool === "eraser" ? null : "eraser");
@@ -982,5 +1467,5 @@ let savedHost = "";
 try { savedHost = localStorage.getItem("rosIP") || ""; } catch (e) { /* 忽略 */ }
 const params = new URLSearchParams(location.search);
 $("host").value = params.get("host") || savedHost || location.hostname || "localhost";
-resize(); setTab("maps");
+resize(); setTab("maps"); renderLoc(); renderArrivals(); renderNav2Log(); renderRadius();
 if (params.get("host") || location.hostname) connect($("host").value);

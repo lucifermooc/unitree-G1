@@ -691,6 +691,94 @@ G1 上没有节点订阅这个话题，发了不会有任何反应。请用 3.1.
 | 4 | 暂停 | | |
 | 5 | 取消 | | |
 
+#### 3.4 避障半径（新增，2026-10-12）
+
+说明：机器人中心离障碍物小于这个距离就算"会撞上"，规划不会从这里走，控制器会在撞上前停车。
+半径越大越安全，但窄通道就过不去。**能通过的通道净宽约为 2 × 半径 + 0.15~0.25 m**
+（例如 0.50 m 时约需 1.15~1.25 m，0.40 m 时约需 0.95~1.05 m）。
+
+没有专门的服务：直接改 Nav2 两个代价地图节点的参数（ROS 2 标准参数服务），改完立即生效，不用重启。
+
+| 节点 | 参数 | 开机默认值（`nav2_params.yaml`） |
+|---|---|---|
+| `/local_costmap/local_costmap` | `robot_radius`、`inflation_layer.inflation_radius` | 0.50、0.75 |
+| `/global_costmap/global_costmap` | `robot_radius`、`inflation_layer.inflation_radius` | 0.50、0.75 |
+
+⚠ 使用规则（后端**不做校验**，由调用方保证）：
+- **`robot_radius` 只允许 0.40 ~ 0.55**。小于 0.40 时 D435 近处盲区里的矮障碍可能来不及发现就撞上；
+  大于 0.55 时 1.1 m 左右的通道基本都过不去。
+- **两个节点都要改，改成同一个值**，否则规划和避障用的半径不一样。
+- **`inflation_radius` 同时改成 `robot_radius + 0.20`**，并在同一个请求里**放在 `robot_radius` 前面**。
+  膨胀半径小于 `robot_radius` 时，超出的那部分不会被当成障碍，等于半径没加上去。
+- 值必须是**小数**：`type: 3`，填 `double_value`，最多两位小数。
+- 前提是 Nav2 在运行（定位模式，见第四章）。`idle`、建图等 Nav2 没在跑的状态下没有这些服务，调用会失败。
+- ⚠ **只在本次 Nav2 运行期间有效**：Nav2 重启后（调 `/mode_set localization`、从 `idle` 切 `patrol` 等，见 4.3）
+  恢复成开机默认值。要一直用别的值，就得在每次 Nav2 启动后重新设置，或者改机器人上的配置文件。
+
+##### 3.4.1 读取当前半径
+
+**Service**: `/local_costmap/local_costmap/get_parameters`、`/global_costmap/global_costmap/get_parameters`　
+**Service Type**: `rcl_interfaces/srv/GetParameters`
+
+````
+{
+  "op": "call_service",
+  "service": "/local_costmap/local_costmap/get_parameters",
+  "args": {"names": ["robot_radius", "inflation_layer.inflation_radius"]}
+}
+````
+
+响应：`values` 和 `names` 按顺序一一对应，读 `double_value`（其余为空的字段已省略）。
+
+````
+{"values": [{"type": 3, "double_value": 0.5}, {"type": 3, "double_value": 0.75}]}
+````
+
+`type` 不是 3（例如 0）表示没有这个参数。读 global 时请求不变，只换服务名。
+
+##### 3.4.2 设置半径
+
+**Service**: `/local_costmap/local_costmap/set_parameters`、`/global_costmap/global_costmap/set_parameters`　
+**Service Type**: `rcl_interfaces/srv/SetParameters`
+
+以设成 0.42 为例（膨胀 = 0.42 + 0.20 = 0.62），**两个节点各调一次**：
+
+````
+{
+  "op": "call_service",
+  "service": "/local_costmap/local_costmap/set_parameters",
+  "args": {"parameters": [
+    {"name": "inflation_layer.inflation_radius", "value": {"type": 3, "double_value": 0.62}},
+    {"name": "robot_radius", "value": {"type": 3, "double_value": 0.42}}
+  ]}
+}
+````
+
+````
+{
+  "op": "call_service",
+  "service": "/global_costmap/global_costmap/set_parameters",
+  "args": {"parameters": [
+    {"name": "inflation_layer.inflation_radius", "value": {"type": 3, "double_value": 0.62}},
+    {"name": "robot_radius", "value": {"type": 3, "double_value": 0.42}}
+  ]}
+}
+````
+
+响应里每个参数一条结果：`{"results": [{"successful": true, "reason": ""}, {"successful": true, "reason": ""}]}`。
+只要有一条 `successful` 为 `false` 就算失败，原因在 `reason` 里。设置完建议按 3.4.1 再读一次，确认两个节点的值一致。
+
+在机器人上用命令行改（先 source `dds_env.sh`）：
+
+````
+for n in /local_costmap/local_costmap /global_costmap/global_costmap; do
+  ros2 param set $n inflation_layer.inflation_radius 0.62
+  ros2 param set $n robot_radius 0.42
+done
+````
+
+网页控制台（`g1_web`）"导航巡逻"页的"避障半径"一栏用的就是这两个接口：显示当前值，超出 0.40~0.55 不允许应用。
+
 ---
 
 ### 第四章 模式设置
@@ -1049,3 +1137,4 @@ ROS2 节点里直接调：`ros2 service call /semantic_map/search aid_robot_msgs
 | 1.5 | 无 | 新增 `/lightning/loc_status` 定位状态（一致性守护，只告警；2026-09-29 部署版本，代码未提交） |
 | 1.6 | 无 | 补充 `/get_ip_addresses`（只取 wlan0） |
 | 4 模式设置 | 只有一张 action 表 | 按源码补全：两个状态维度、每个 action 的执行步骤 / 前置条件 / 耗时、阻塞调用、`idle` 在定位时不停定位、`remote_control` 只改标签、开机默认状态、典型流程 |
+| 3.4 | 无 | 新增避障半径：用两个 costmap 节点的 `get_parameters` / `set_parameters` 读写 `robot_radius` 和 `inflation_layer.inflation_radius`（限 0.40~0.55，膨胀 = 半径 + 0.20；Nav2 重启后恢复默认 0.50 / 0.75） |
