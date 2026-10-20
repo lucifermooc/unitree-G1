@@ -1,0 +1,20 @@
+# Orin 版 g1-robot：与 robot_bringup/system/g1-robot.service 相同，只是 g1_autostart.sh 在常驻 jazzy 容器 g1 里 docker exec 执行（g1_docker.sh service）。
+# 由 install_orin.sh 拷到 /etc/systemd/system/。不要在 Orin 上执行 g1_service.sh install：它会装回主机版 unit（主机没有 jazzy）。
+[Unit]
+Description=G1 robot stack in container g1 (ros2 launch robot_bringup robot.launch.py, DDS cyclonedds_g1.xml)
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=unitree
+ExecStart=/bin/bash /opt/G1/docker/g1_docker.sh service robot
+KillSignal=SIGINT
+TimeoutStopSec=40
+# docker exec 不转发信号：ExecStop 按 /tmp/g1-robot.pid 给容器里的进程发 SIGINT（= Ctrl-C），等它退出（≤30 s）
+ExecStop=/bin/bash /opt/G1/docker/g1_docker.sh service-stop robot
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

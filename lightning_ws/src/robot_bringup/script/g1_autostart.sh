@@ -51,7 +51,7 @@ export LANG="${LANG:-C.UTF-8}"
 log "RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-} ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-}"
 
 # CycloneDDS 绑定的网卡（连机器人本体/雷达的网段）没有 IP 时所有节点都会起不来：一直等到它就绪。
-DDS_XML="$SYSTEM_DIR/cyclonedds_g1.xml"
+DDS_XML="${CYCLONEDDS_URI#file://}"   # dds_env.sh 选定的那份（可能是本机覆盖 /opt/G1/cyclonedds_g1.local.xml）
 IFACE="$(grep -o 'NetworkInterface name="[^"]*"' "$DDS_XML" | head -1 | cut -d'"' -f2)"
 if [ -n "$IFACE" ]; then
   waited=0

@@ -45,9 +45,11 @@ echo "== 停栈"
 $SSH "$SERVICE stop" | tail -1
 
 echo "== 编译 $PKGS"
-$SSH "cd $WS && source /opt/ros/jazzy/setup.bash && { [ ! -f install/setup.bash ] || source install/setup.bash; } && \
+BUILD="cd $WS && source /opt/ros/jazzy/setup.bash && { [ ! -f install/setup.bash ] || source install/setup.bash; } && \
       export PYTHONNOUSERSITE=1 && \
       colcon build --packages-select $PKGS 2>&1 | grep -E 'Finished|Failed|error:|Summary' | tail -20; exit \${PIPESTATUS[0]}"
+# Orin（主机是 20.04，没有 jazzy）在 jazzy 容器里编译：有 /opt/G1/docker/g1_docker.sh 就经它执行（tools/deploy/orin_docker）
+$SSH "W=; [ -f /opt/G1/docker/g1_docker.sh ] && W='bash /opt/G1/docker/g1_docker.sh run'; \$W bash -c $(printf %q "$BUILD")"
 
 echo "== 启动"
 $SSH "$SERVICE start"

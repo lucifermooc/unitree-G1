@@ -1,0 +1,19 @@
+# Orin 版 g1-semantic-map：semantic_map.launch.py 在 jazzy 容器里跑（CPU 推理，G1_SEMANTIC_ARGS 在 /opt/G1/g1_autostart.local.env）。
+[Unit]
+Description=G1 semantic map in container g1 (ros2 launch semantic_map_ros semantic_map.launch.py)
+Wants=network-online.target
+After=network-online.target docker.service g1-robot.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=unitree
+ExecStart=/bin/bash /opt/G1/docker/g1_docker.sh service semantic
+KillSignal=SIGINT
+TimeoutStopSec=30
+# docker exec 不转发信号：ExecStop 按 /tmp/g1-semantic.pid 给容器里的进程发 SIGINT（= Ctrl-C），等它退出（≤30 s）
+ExecStop=/bin/bash /opt/G1/docker/g1_docker.sh service-stop semantic
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

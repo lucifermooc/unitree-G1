@@ -19,7 +19,8 @@
      ros2 CLI 就会报 "Failed to find a free participant index for domain 0"。无 Peers 时调大不增加流量。
      （上限 119；100 对应端口最高 7611，不与 domain 1 的 7650 起始端口重叠）
 
-  注意：网卡名与机器人本体网段绑定，换机器需同步修改。
+  注意：网卡名与机器人本体网段绑定。网卡名不同的机器（如 Orin eth0）不改本文件，放一份改过网卡名的
+  /opt/G1/cyclonedds_g1.local.xml，dds_env.sh 优先用它。
 -->
 <CycloneDDS xmlns="https://cdds.io/config">
   <Domain Id="any">

@@ -60,7 +60,8 @@ check_units() {
   local u unit
   for u in "${UNITS[@]}"; do
     unit="$(systemctl cat "$u" 2>/dev/null || true)"   # 不用管道接 grep -q：pipefail 下 SIGPIPE 会误报
-    [[ "$unit" == *"ExecStart=/bin/bash $AUTOSTART "* ]] \
+    # Orin 容器版 unit（tools/deploy/orin_docker）经 /opt/G1/docker/g1_docker.sh 执行同一个 AUTOSTART
+    [[ "$unit" == *"ExecStart=/bin/bash $AUTOSTART "* || "$unit" == *"ExecStart=/bin/bash /opt/G1/docker/g1_docker.sh service "* ]] \
       || echo "WARN $u does not run $AUTOSTART (old unit pointing at src?); re-run: bash $G1_SHARE/script/g1_service.sh install" >&2
   done
 }

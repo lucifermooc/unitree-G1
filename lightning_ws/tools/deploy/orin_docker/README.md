@@ -1,0 +1,51 @@
+# G1 Orin 容器部署（无 Thor 的 G1）
+
+G1 自带的 Orin NX（PC2，`192.168.123.164`）是 JetPack 5.1.1 / Ubuntu 20.04，只能装 foxy，跑不了我们的 jazzy 栈。
+做法：Orin 主机不动，jazzy 栈跑在 Ubuntu 24.04 镜像 `g1-jazzy` 的**常驻容器 `g1`** 里。
+这个容器只创建一次（`--restart unless-stopped`），shell、编译、开机服务都 `docker exec` 进同一个容器，在容器里装的东西会保留。
+容器和 Thor 主机的路径完全一样，包括 `/opt/G1/lighting_ws`、`/home/unitree`、`/tmp`；网络、pid、ipc 都用 host，privileged 模式。
+所以 install 里的 `g1_autostart.sh`、`dds_env.sh`、`g1_service.sh` 都照常用。
+
+首台：阿里云转发 `ssh -p 30524 unitree@47.108.223.180`（本机 `~/.ssh/config` 别名 `g1-orin`），WiFi `192.168.1.109`。
+
+## 文件
+
+| 文件 | 装到 | 作用 |
+|---|---|---|
+| `Dockerfile`、`g1_env.sh` | `/opt/G1/docker/` | 镜像：ROS 包取 Thor 上手动安装的那批 `ros-jazzy-*`（不含 rviz / rqt 等界面包），开发库、语义地图 Python 依赖与 Thor 同版本（torch 为 CPU 版） |
+| `g1_docker.sh` | `/opt/G1/docker/` | `build-image` / `up` / `recreate` / `shell` / `run <命令>` / `service`、`service-stop robot\|semantic` |
+| `g1-robot.service`、`g1-semantic-map.service` | `/etc/systemd/system/` | 容器版 unit：ExecStart 为 `g1_docker.sh service ...`（docker exec）；docker exec 不转发信号，所以 ExecStop 按 `/tmp/g1-<名>.pid` 发 SIGINT |
+| `container_setup.sh` | `/opt/G1/docker/` | 新建容器时由 `g1_docker.sh` 自动执行（root）：装 Pangolin 0.9.3（lightning thirdparty 里的 zip，lightning 编译硬依赖） |
+| `install_orin.sh` | — | 安装上面这些、sudoers、DDS 缓冲、Qdrant 容器（`qdrant/qdrant:v1.19.1`，restart always） |
+
+本机专属文件（不在仓库里）：
+- `/opt/G1/cyclonedds_g1.local.xml`：网卡名改成 `eth0`，`dds_env.sh` 优先读它。
+- `/opt/G1/G1_MID360s_config.local.json`：`host_ip` 改成 `.164`。
+- `/opt/G1/g1_autostart.local.env`：D435 序列号、`livox_config:=`，语义地图用 `use_fp16:=false`。
+
+**不要在 Orin 上执行 `g1_service.sh install`**：它会装回主机版 unit，而主机上没有 jazzy。其余子命令（start/stop/restart/status/log）照常用。
+
+## 首次部署
+
+1. 主机：`usermod -aG docker unitree`；`/etc/docker/daemon.json` 加 `registry-mirrors`，daocloud 放第一位（docker.1ms.run 能取清单、拉不下层）；
+   建 `/opt/G1`。
+2. 从 Thor 局域网拷文件（`ssh -A` 转发本机密钥）：
+   - `~/unitree_ros2`：Thor 上编好的，aarch64 + jazzy，容器里直接能用。
+   - `/opt/G1/deps_backup/lightning_thirdparty`，拷到 `src/lightning-lm/thirdparty`。
+   - `~/models/bge-m3`。
+   - `/opt/G1/bags/replay/*.py`。
+3. 同步源码到 `/opt/G1/lighting_ws/src`，`rsync` 排除规则和 `deploy_to_robot.sh` 相同。
+4. `bash g1_docker.sh build-image`，然后在容器里全量编译（`run` 会先自动创建容器 `g1`）：
+   `g1_docker.sh run bash -c 'cd /opt/G1/lighting_ws && export PYTHONNOUSERSITE=1 && colcon build --cmake-args -DROS_EDITION=ROS2 -DDISTRO_ROS=jazzy -DBUILD_WITH_MARCH_NATIVE=ON'`
+5. `bash install_orin.sh`，写好上面三个本机专属文件，再执行 `g1_service.sh restart`。容器 `g1` 会在第一次 exec 时自动创建。
+
+之后的增量部署照常：`tools/deploy/deploy_to_robot.sh g1-orin <包>`。脚本发现机器上有 `/opt/G1/docker/g1_docker.sh` 时，会在容器里编译。
+
+## 手动用 ROS
+
+```bash
+bash /opt/G1/docker/g1_docker.sh shell              # 进常驻容器 g1，已 source jazzy + install + dds_env.sh
+bash /opt/G1/docker/g1_docker.sh run ros2 topic list
+```
+- 镜像重建后要执行 `g1_docker.sh recreate`，用新镜像重建容器。容器里手动装的东西会丢，长期要用的请写进 Dockerfile。
+不要在主机终端里直接用 `ros2`：主机的 `~/.bashrc` 是 foxy 环境。

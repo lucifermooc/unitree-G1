@@ -159,6 +159,7 @@ MID360 /livox/lidar（CustomMsg，逐点 offset_time）+ IMU
 |---|---|
 | **Thor 128.146**（`unitree@192.168.128.146`，`/opt/G1/lighting_ws`，aarch64 / Ubuntu 24.04 / jazzy） | 主测机，**v3.0.0**：v1.0.0 全部部署于 10-06，10-08 又部署了 lightning（定位修复 3.2.9，已实机验证；同日再部署 g2p5 扩容修复 3.1.7）。sudo 要密码（服务启停免密）；开机自启 unit 指向 install；D435 序列号与默认值一致 |
 | **Thor 112.70**（10-15 起 `192.168.1.103` 直连；阿里云 10-20 起 `ssh g1-thor` = `-p 30422 unitree@47.108.223.180`，原 45022，tegra-ubuntu，wlP1p1s0） | 10-15 核对：`nav2_params.yaml` 与 `4213f93`（v1.0.0 导航）md5 一致，lightning 仍是 10-08 修复前的版本（无 3.2.9），src 已删。手已改装。D435 线易松（10-15 开机没认到，重插后 USB 3 正常）。sudo 免密。D435i 序列号 317622075180，写在 `/opt/G1/g1_autostart.local.env` |
+| **Orin 30524**（无 Thor 的 G1，`ssh g1-orin` = `-p 30524 unitree@47.108.223.180`，WiFi 192.168.1.109，eth0 = 192.168.123.164 即 G1 自带 PC2） | 10-20 部署当前工作区（v3.0.0 + 未提交的 3.3.6 keepout 修复）。JetPack 5.1.1 / Ubuntu 20.04 装不了 jazzy → 栈跑在常驻容器 `g1`（镜像 `g1-jazzy`，24.04 + jazzy），见 `tools/deploy/orin_docker/README.md`；手动 ros2 用 `/opt/G1/docker/g1_docker.sh shell`，**不要执行 `g1_service.sh install`**。本机覆盖：`/opt/G1/cyclonedds_g1.local.xml`（eth0）、`G1_MID360s_config.local.json`（host_ip .164）、local.env（D435i 250122078132）。语义地图 CPU 推理。sudo 要密码（服务启停免密）。**还没有地图**。另有别人的 `xysj-robot` 服务（unitree_sdk2，DDS domain 0），不要动 |
 | 开发机（本地） | x86 / Ubuntu 22.04 / humble。**默认不在本地编译**，本地 install 不完整、不可用；用户授权时可在 scratchpad 编 lightning 做离线回放（5.2）。Meteor Lake 核显在 6.8 内核下会 GPU hang 导致整机卡死（`journalctl -b -1 -k | grep -E 'i915|DMAR|GPU HANG'`） |
 
 ### 1.3 实测指标（128.146）
