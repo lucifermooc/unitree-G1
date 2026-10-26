@@ -17,7 +17,7 @@ def generate_launch_description():
     bridge = Path(get_package_share_directory('g1_nav_bridge'))
     nav = Path(get_package_share_directory('aid_navigation2'))
     args = ['map', 'use_collision_monitor', 'use_keepout', 'use_realsense_obstacles',
-            'use_d435_mark_filter']
+            'use_d435_mark_filter', 'nav_params_overlay']
     return LaunchDescription([
         DeclareLaunchArgument('map', default_value='/opt/G1/lighting_ws/data/new_map/map.yaml',
                               description='导航栅格地图 YAML 的绝对路径，由 map_server 加载'),
@@ -32,12 +32,17 @@ def generate_launch_description():
         DeclareLaunchArgument('use_d435_mark_filter', default_value='true',
                               choices=['true', 'false'],
                               description='D435 标记源吃 d435_mark_filter 输出（4 邻域剔除孤立飞点，参数见 g1_nav_bridge/config/d435_mark_filter.yaml）；false 改回原始点云'),
+        DeclareLaunchArgument('nav_params_overlay', default_value='',
+                              description='合并到 nav2_params.yaml 之上的本机参数文件（空 = 不合并）'),
+        DeclareLaunchArgument('bridge_params_overlay', default_value='',
+                              description='叠加在 nav_bridge.yaml 之后的本机参数文件（空 = 不叠加）'),
         DeclareLaunchArgument('start_bridge', default_value='true',
                               description='robot.launch 已启动 bridge 时必须设为 false'),
         IncludeLaunchDescription(PythonLaunchDescriptionSource(str(bridge/'launch/nav_bridge.launch.py')),
                                  launch_arguments={'cmd_vel_topic': PythonExpression([
                                      "'/cmd_vel_safe' if '", LaunchConfiguration('use_collision_monitor'),
-                                     "' == 'true' else '/cmd_vel'"]) }.items(),
+                                     "' == 'true' else '/cmd_vel'"]),
+                                     'bridge_params_overlay': LaunchConfiguration('bridge_params_overlay')}.items(),
                                  condition=IfCondition(LaunchConfiguration('start_bridge'))),
         IncludeLaunchDescription(PythonLaunchDescriptionSource(str(nav/'launch/g1_navigation_direct.launch.py')),
                                  launch_arguments={k: LaunchConfiguration(k) for k in args}.items()),

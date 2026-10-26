@@ -17,8 +17,8 @@
   <depend>libpcl-all-dev</depend>
   <depend>unitree_api</depend>
   <depend>unitree_hg</depend>
-  <exec_depend>unitree_go</exec_depend>
-  <exec_depend>nav_msgs</exec_depend>
+  <depend>unitree_go</depend>
+  <depend>nav_msgs</depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>aid_navigation2</exec_depend>

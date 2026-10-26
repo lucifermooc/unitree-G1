@@ -13,6 +13,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <unitree_api/msg/response.hpp>
 
+#include "g1_nav_bridge/cmdvel_rewrite.hpp"
 #include "g1_nav_bridge/unitree/g1_loco_client.hpp"
 
 namespace g1_nav_bridge {
@@ -29,12 +30,27 @@ class CmdVelToSport final : public rclcpp::Node {
     // G1 有最小有效速度：直行 vx < 0.3 m/s 走不动；转弯时 |wz| < 0.6 rad/s 转不动。
     // turn_min_vx：转弯时附加的最小前进速度。2026-10-06 实测 G1 能原地转，配置里改为 0（默认值保留旧行为）。
     // 导航输出的非零低速按方向提升到最小有效值；低于 *_stop 视为停止/不转。
-    min_vx_ = declare_parameter<double>("min_vx", 0.3);
-    min_wz_ = declare_parameter<double>("min_wz", 0.6);
-    turn_min_vx_ = declare_parameter<double>("turn_min_vx", 0.2);
-    vx_stop_ = declare_parameter<double>("vx_stop", 0.05);
+    rewrite_.min_vx = declare_parameter<double>("min_vx", 0.3);
+    rewrite_.min_wz = declare_parameter<double>("min_wz", 0.6);
+    // 走路时（vx >= vx_stop）的最小 |wz|，默认 = min_wz（旧行为）。原地转的死区走路时没有，见 cmdvel_rewrite.hpp。
+    rewrite_.walk_min_wz = declare_parameter<double>("walk_min_wz", rewrite_.min_wz);
+    rewrite_.turn_min_vx = declare_parameter<double>("turn_min_vx", 0.2);
+    rewrite_.vx_stop = declare_parameter<double>("vx_stop", 0.05);
     // |wz| 低于该值视为直行中的小幅航向修正，原样透传（放大会走成蛇形）。
-    wz_stop_ = declare_parameter<double>("wz_stop", 0.15);
+    rewrite_.wz_stop = declare_parameter<double>("wz_stop", 0.15);
+    // 后退（只给脱困用的 BT BackUp）。默认 0 = 不允许，vx<0 一律钳为 0（带 Thor 背包的 G1 倒走会摔，CLAUDE.md 2.1）。
+    // 无背包的 G1（Orin 30524）2026-10-24 实测：-0.1 不动、-0.2 / -0.3 稳定后退，在本机覆盖文件里放开。
+    max_reverse_vx_ = declare_parameter<double>("max_reverse_vx", 0.0);
+    rewrite_.min_reverse_vx = declare_parameter<double>("min_reverse_vx", 0.25);
+    if (!std::isfinite(rewrite_.walk_min_wz) || rewrite_.walk_min_wz < 0.0) {
+      throw std::invalid_argument("walk_min_wz must be finite and >= 0");
+    }
+    if (!std::isfinite(max_reverse_vx_) || max_reverse_vx_ < 0.0 ||
+        !std::isfinite(rewrite_.min_reverse_vx) || rewrite_.min_reverse_vx < 0.0 ||
+        (max_reverse_vx_ > 0.0 && rewrite_.min_reverse_vx > max_reverse_vx_)) {
+      throw std::invalid_argument(
+          "max_reverse_vx/min_reverse_vx must be finite, >= 0, min <= max");
+    }
 
     subscription_ = create_subscription<geometry_msgs::msg::Twist>(
         get_parameter("cmd_vel_topic").as_string(), 10,
@@ -83,17 +99,28 @@ class CmdVelToSport final : public rclcpp::Node {
       RCLCPP_ERROR(get_logger(), "Invalid cmd_vel; sending zero velocity");
       velocity.fill(0.0F);
     }
-    // 【硬性安全约束】G1 收到负的前进速度会直接摔倒。无论上游 Nav2 / 遥控 / 恢复行为
-    // 发来什么，这里一律钳到 >= 0；这是最后一道闸，不依赖任何上游配置正确。
+    // 【硬性安全约束】带 Thor 背包的 G1 收到负的前进速度会直接摔倒。max_reverse_vx 为 0（默认）时，无论上游
+    // Nav2 / 遥控 / 恢复行为发来什么，这里一律钳到 >= 0；这是最后一道闸，不依赖任何上游配置正确。
+    // 放开时也只允许直线后退：带转向的后退没实测过，按原地转处理（vx 置 0）。
     if (velocity[0] < 0.0F) {
-      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
-                           "拒绝负的前进速度 vx=%.3f（G1 倒走会摔倒），已钳为 0",
-                           static_cast<double>(velocity[0]));
-      velocity[0] = 0.0F;
+      if (max_reverse_vx_ <= 0.0) {
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
+                             "拒绝负的前进速度 vx=%.3f（G1 倒走会摔倒），已钳为 0",
+                             static_cast<double>(velocity[0]));
+        velocity[0] = 0.0F;
+      } else if (std::fabs(velocity[2]) >= rewrite_.wz_stop) {
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
+                             "后退时不允许转向 vx=%.3f wz=%.3f，vx 已钳为 0",
+                             static_cast<double>(velocity[0]),
+                             static_cast<double>(velocity[2]));
+        velocity[0] = 0.0F;
+      } else {
+        velocity[0] = std::max(velocity[0], -static_cast<float>(max_reverse_vx_));
+      }
     }
 
     const std::array<float, 3> raw = velocity;
-    velocity = ApplyMinimumVelocity(velocity);
+    velocity = ApplyMinimumVelocity(velocity, rewrite_);
     if (velocity != raw) {
       RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
                            "cmd_vel lifted: vx %.3f->%.3f wz %.3f->%.3f",
@@ -106,32 +133,6 @@ class CmdVelToSport final : public rclcpp::Node {
       pending_ = true;
     }
     condition_.notify_one();
-  }
-
-  static float Lift(float value, double stop, double minimum) {
-    const float magnitude = std::fabs(value);
-    if (magnitude < stop) {
-      return 0.0F;
-    }
-    return std::copysign(std::max(magnitude, static_cast<float>(minimum)), value);
-  }
-
-  std::array<float, 3> ApplyMinimumVelocity(std::array<float, 3> velocity) const {
-    const float wz = velocity[2];
-    if (std::fabs(wz) >= wz_stop_) {
-      // 转弯：角速度提到最小有效值；前进速度至少 turn_min_vx（为 0 时允许原地转；显式后退则保持后退方向）。
-      velocity[2] = std::copysign(std::max(std::fabs(wz), static_cast<float>(min_wz_)), wz);
-      const float vx = velocity[0];
-      velocity[0] = vx <= -static_cast<float>(vx_stop_)
-                        ? std::min(vx, -static_cast<float>(turn_min_vx_))
-                        : std::max(vx, static_cast<float>(turn_min_vx_));
-      return velocity;
-    }
-    velocity[0] = Lift(velocity[0], vx_stop_, min_vx_);
-    if (velocity[0] == 0.0F) {
-      velocity[2] = 0.0F;  // 既不走也不转：停止
-    }
-    return velocity;
   }
 
   void Run() {
@@ -164,11 +165,8 @@ class CmdVelToSport final : public rclcpp::Node {
   std::condition_variable condition_;
   std::array<float, 3> velocity_{};
   double duration_{0.5};
-  double min_vx_{0.3};
-  double min_wz_{0.6};
-  double turn_min_vx_{0.2};
-  double vx_stop_{0.05};
-  double wz_stop_{0.15};
+  VelocityRewrite rewrite_;
+  double max_reverse_vx_{0.0};
   bool pending_{false};
   bool stopping_{false};
 };
