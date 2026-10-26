@@ -1,0 +1,34 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>aid_nav_shim_controller</name>
+  <version>0.1.0</version>
+  <description>
+    G1 用的 Nav2 控制器外壳：离目标远时转给 MPPI（跟线 + 局部避障），离目标近时转给 RPP（到点 + 原地转到目标朝向），
+    航向偏离路径太大时先原地转。参考轮式机器人 aid_pure_pursuit_shim_controller 的结构。humble / jazzy 通用。
+  </description>
+  <maintainer email="you@example.com">G1 Team</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>rclcpp_lifecycle</depend>
+  <depend>pluginlib</depend>
+  <depend>nav2_core</depend>
+  <depend>nav2_util</depend>
+  <depend>nav2_costmap_2d</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_geometry_msgs</depend>
+  <depend>angles</depend>
+  <exec_depend>nav2_mppi_controller</exec_depend>
+  <exec_depend>nav2_regulated_pure_pursuit_controller</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+    <nav2_core plugin="${prefix}/shim_controller_plugin.xml" />
+  </export>
+</package>

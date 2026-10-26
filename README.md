@@ -97,6 +97,11 @@ ros2 launch g1_sim sim.launch.py           # 然后浏览器打开 http://localh
 
 
 bash /opt/G1/docker/g1_docker.sh shell
+
+bash /opt/G1/nav_controller_switch.sh shim   # 改成 shim，重启 g1-robot 后生效
+bash /opt/G1/nav_controller_switch.sh rpp    # 切回现在的 RPP
+
+
 # 进入容器后：后退 vx=-0.1，持续 1 s，到时间本体自己停
 ros2 topic pub --once /api/sport/request unitree_api/msg/Request \
   "{header: {identity: {id: 1, api_id: 7105}}, parameter: '{\"velocity\": [-0.1, 0.0, 0.0], \"duration\": 1.0}'}"

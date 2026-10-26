@@ -301,6 +301,34 @@ class G1ParamTests(unittest.TestCase):
             self.assertLessEqual(float(timer.group(1)), 5.0)
             self.assertIn('<IsPathValid path="{path}"/>', bt)
 
+    def test_orin_shim_overlay(self):
+        """Orin 30524 的 shim 版覆盖（nav_controller_switch.sh 切换）：除控制器外与 nav2_params.local.yaml 合并结果一致；
+        near（RPP）= 现状 RPP 的生效参数，primary（MPPI）= 仓库 FollowPathMPPI，vx_min 恒 0。"""
+        orin = SRC.parent / 'tools/deploy/orin_docker'
+        rpp_nav, shim_nav = copy.deepcopy(self.nav), copy.deepcopy(self.nav)
+        direct.merge_overlay(rpp_nav, yaml.safe_load((orin / 'nav2_params.local.yaml').read_text()))
+        self.assertTrue(direct.merge_overlay(shim_nav, yaml.safe_load((orin / 'nav2_params.shim.local.yaml').read_text())))
+        rc = rpp_nav['controller_server']['ros__parameters']
+        sc = shim_nav['controller_server']['ros__parameters']
+        for k in ('bt_navigator', 'velocity_smoother', 'local_costmap', 'global_costmap', 'planner_server', 'behavior_server'):
+            self.assertEqual(shim_nav[k], rpp_nav[k], k)
+        self.assertEqual({k: v for k, v in sc.items() if k != 'FollowPath'}, {k: v for k, v in rc.items() if k != 'FollowPath'})
+        fp = sc['FollowPath']
+        self.assertEqual(fp['plugin'], 'aid_nav_shim_controller::NavShimController')
+        rpp = {k: v for k, v in rc['FollowPath'].items() if k != 'plugin'}
+        self.assertEqual({k: fp['near'][k] for k in rpp}, rpp)
+        mppi = {k: v for k, v in rc['FollowPathMPPI'].items() if k != 'plugin'}
+        self.assertEqual({k: fp[k] for k in mppi}, mppi)
+        self.assertEqual(fp['vx_min'], 0.0)
+        self.assertFalse(fp['near']['allow_reversing'])
+        self.assertEqual(fp['rotate_angular_vel'], fp['near']['rotate_to_heading_angular_vel'])
+        inflation = shim_nav['local_costmap']['local_costmap']['ros__parameters']['inflation_layer']
+        self.assertEqual(fp['ObstaclesCritic']['inflation_radius'], inflation['inflation_radius'])
+        self.assertEqual(fp['ObstaclesCritic']['cost_scaling_factor'], inflation['cost_scaling_factor'])
+        # 卡住检测要比 progress_checker 宽松（否则 progress_checker 先判失败，本检测没意义）且留出等人让路的时间
+        self.assertGreaterEqual(fp['stall_timeout'], sc['progress_checker']['movement_time_allowance'] * 0.5)
+        self.assertGreater(fp['stall_min_progress'], sc['progress_checker']['required_movement_radius'])
+
     def test_orin_backup_overlay(self):
         """无 Thor 背包的 Orin 30524 只经本机覆盖文件放开后退：BT BackUp、smoother 下限、桥接上限三处要一致。"""
         orin = SRC.parent / 'tools/deploy/orin_docker'

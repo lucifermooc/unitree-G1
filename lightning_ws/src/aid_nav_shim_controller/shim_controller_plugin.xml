@@ -1,0 +1,5 @@
+<library path="aid_nav_shim_controller">
+  <class type="aid_nav_shim_controller::NavShimController" base_class_type="nav2_core::Controller">
+    <description>离目标远：MPPI（跟线 + 避障）；离目标近：RPP（到点 + 原地转）；航向偏离路径过大时先原地转。</description>
+  </class>
+</library>
