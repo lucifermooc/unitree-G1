@@ -39,7 +39,7 @@ MARK_SOURCES = ('realsense_mark', 'realsense_mark_tall')
 MID360_RAW = '/lightning/registered_scan'
 MID360_NAV = '/lightning/registered_scan_nav'
 MID360_MIN_RANGE = 0.25   # 原 obstacle_layer.obstacle_min_range：更近的是打在头上的机身回波
-# base_link 水平半径内的点在进 STVL 前删掉（= yaml 里的足迹半径，测试守着）：footprint 自清只遮当前足迹、不删体素，
+# base_link 水平半径内的点在进 STVL 前删掉（>= yaml 里的足迹半径，测试守着）：footprint 自清只遮当前足迹、不删体素，
 # 身边每帧都有的回波会在机器人走过的位置留下一串障碍（2026-09-24 实测）。
 MID360_CROP_RADIUS = 0.50
 COSTMAPS = ('local_costmap', 'global_costmap')

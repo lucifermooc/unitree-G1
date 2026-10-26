@@ -343,7 +343,8 @@ local_costmap:
       publish_frequency: 5.0
       transform_tolerance: 0.20
       resolution: 0.05
-      robot_radius: 0.50
+      # 2026-10-26 0.50 -> 0.40（与 global 同步，见 global_costmap 的说明）
+      robot_radius: 0.40
       footprint_padding: 0.0
       rolling_window: true
       width: 6
@@ -501,12 +502,13 @@ local_costmap:
         # 2026-09-21 对齐旧系统（0.50 / 8.0）：原 0.85/2.0 把障碍外 0.85 m 全染成中高代价，
         # 0.50 m 处仍有 169，RViz 上几乎没有白色，MPPI 的代价地形也被抹平。
         # 公式（d = 到障碍距离，r = robot_radius）：d ≤ r → 253；r < d ≤ inflation_radius → 252·exp(-k·(d-r))；再外为 0。
-        # 当前 r=0.50、k=8：0.55→168、0.60→113、0.65→75、0.70→50、0.75→34、0.80→23、0.85→15，0.85 m 外直接回到白色，
-        # “只走白色”才成为可执行判据。（2026-10-14 订正：旧注释的 0.45→76 等数字是按 r=0.30 算的。）
+        # 当前 r=0.40、k=8：0.45→169、0.50→113、0.55→76、0.60→51、0.65→34、0.70→23、0.75→15、0.85→7，0.85 m 外直接回到白色，
+        # “只走白色”才成为可执行判据。（2026-10-26 r 0.50 -> 0.40 后重算；r=0.50 时 0.55→168 … 0.85→15。）
         # 改动此处必须同步 MPPI 的 ObstaclesCritic.inflation_radius / cost_scaling_factor。
         cost_scaling_factor: 8.0
-        # 随 robot_radius 同步：梯度带宽 = inflation_radius - robot_radius（测试要求 0.10~0.40），
-        # 避免代价从高值直接掉 0 的台阶。2026-10-25 0.75 -> 0.85（带宽 0.35，边界代价 15）：路径离障碍再远一点。
+        # 梯度带宽 = inflation_radius - robot_radius（测试要求 0.10~0.50），避免代价从高值直接掉 0 的台阶。
+        # 2026-10-25 0.75 -> 0.85：路径离障碍再远一点。2026-10-26 r 改 0.40 后不动它（带宽 0.45，边界代价 7），
+        # 路径离障碍的距离保持不变，只是机器人能挤进更窄的地方（= 以前网页上把避障半径改成 0.4 的效果）。
         inflation_radius: 0.85
       always_send_full_costmap: true
 
@@ -531,7 +533,10 @@ global_costmap:
       # 安全余量一律由 inflation_radius 承担，它只染代价、不清除任何东西。
       # 另：D435+mid360 在 base_link 正前 0~0.40 m 无任何点（盲区），
       # 只要本值 <= 0.40，自清区完全落在盲区内，就不可能吃掉真实障碍。
-      robot_radius: 0.50
+      # 2026-10-26 0.50 -> 0.40（用户要求，= 以前网页"避障半径"常用值）：0.50 时 253 带让 1.0 m 内的通道全不可走，
+      # 仿真窄道（1.15 m）中心只剩 0.15 m 可走带。MID360 足迹剔除（MID360_CROP_RADIUS）和 D435 手部剔除
+      # （d435_mark_filter self_crop_radius）仍是 0.50：走路时手离 base_link 水平最远 0.48 m，缩小会把手和机身回波放回来。
+      robot_radius: 0.40
       footprint_padding: 0.0
       track_unknown_space: true
       unknown_cost_value: 255
@@ -691,7 +696,7 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         # 全局用 6.0（比局部略缓），让 A* 在空旷处更愿意走通道中线；与旧系统一致。
-        # r=0.50、k=6：0.55→186、0.65→102、0.75→56、0.85→31，0.85 m 外为 0。
+        # r=0.40、k=6：0.45→187、0.55→103、0.65→56、0.75→31、0.85→17，0.85 m 外为 0（2026-10-26 r 0.50 -> 0.40 后重算）。
         # 2026-10-25 0.75 -> 0.85：路径离障碍再远一点（与 local 同步）。
         cost_scaling_factor: 6.0
         inflation_radius: 0.85

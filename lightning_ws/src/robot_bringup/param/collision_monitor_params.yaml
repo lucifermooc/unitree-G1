@@ -22,8 +22,8 @@ collision_monitor:
     SafetyZone:
       type: "circle"
       action_type: "stop"
-      # robot_radius(0.50) + 0.20 余量，与 nav2_params.yaml 的 robot_radius 手工保持一致。
-      radius: 0.70
+      # robot_radius(0.40) + 0.20 余量，与 nav2_params.yaml 的 robot_radius 手工保持一致（2026-10-26 0.70 -> 0.60）。
+      radius: 0.60
       min_points: 4
       visualize: True
       enabled: True

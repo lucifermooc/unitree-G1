@@ -81,8 +81,10 @@ class G1ParamTests(unittest.TestCase):
         self.assertAlmostEqual(pf['blind'], direct.MID360_MIN_RANGE)
         # 足迹内的点必须在进 STVL 前删掉：自清只遮当前足迹，走开后体素会露出来
         self.assertIn("'crop_radius': MID360_CROP_RADIUS", text)
+        # 2026-10-26 robot_radius 0.50 -> 0.40 后剔除半径仍 0.50（机身 / 吊带回波实测在 0.5 m 内）：只要求不小于足迹
+        self.assertAlmostEqual(direct.MID360_CROP_RADIUS, 0.50)
         for p in (self.local, self.globl):
-            self.assertAlmostEqual(direct.MID360_CROP_RADIUS, p['robot_radius'])
+            self.assertGreaterEqual(direct.MID360_CROP_RADIUS, p['robot_radius'])
         c = self.safe['collision_monitor']['ros__parameters']['pointcloud1']
         self.assertEqual(c['topic'], '/lightning/registered_scan')
         self.assertAlmostEqual(c['min_height'], 0.10)
@@ -90,11 +92,12 @@ class G1ParamTests(unittest.TestCase):
     def test_collision_geometry_is_consistent(self):
         """碰撞判定只看 robot_radius；inflation 仅决定代价梯度长度。"""
         for p in (self.local, self.globl):
-            self.assertAlmostEqual(p['robot_radius'], 0.50)
+            self.assertAlmostEqual(p['robot_radius'], 0.40)   # 2026-10-26 0.50 -> 0.40
             inf = p['inflation_layer']
             band = inf['inflation_radius'] - p['robot_radius']
             self.assertGreater(band, 0.10, '膨胀半径必须大于碰撞半径，否则边界出现代价断崖')
-            self.assertLess(band, 0.40, '梯度带过宽会把大片区域染成中高代价')
+            # 0.40 -> 0.50：r 改 0.40 后膨胀仍 0.85（带宽 0.45，local 边界代价 7），路径离障碍的距离不变
+            self.assertLess(band, 0.50, '梯度带过宽会把大片区域染成中高代价')
         self.assertAlmostEqual(self.local['inflation_layer']['cost_scaling_factor'], 8.0)
         self.assertAlmostEqual(self.globl['inflation_layer']['cost_scaling_factor'], 6.0)
         # 提速后制动距离必须小于传感器盲区量级
@@ -103,7 +106,7 @@ class G1ParamTests(unittest.TestCase):
         self.assertLess(brake, 0.45, f'制动距离 {brake:.2f}m 超过盲区 0.40m')
         zone = self.safe['collision_monitor']['ros__parameters']['SafetyZone']
         self.assertEqual(zone['action_type'], 'stop')
-        self.assertAlmostEqual(zone['radius'], 0.70)  # robot_radius + 0.20
+        self.assertAlmostEqual(zone['radius'], self.local['robot_radius'] + 0.20)
 
     def test_stvl_d435_sources(self):
         for p in (self.local, self.globl):
@@ -157,10 +160,12 @@ class G1ParamTests(unittest.TestCase):
             self.assertTrue(f['floating_filter'])
             self.assertLessEqual(f['min_range'], 1.5)
         self.assertGreaterEqual(f['min_depth'], 0.35)   # 镜头前 0.2~0.3 m 的小团点 4 邻域删不掉
-        # 走路时前摆的手（实测离 base_link 水平 ≤0.48 m、高 0.57~0.73 m）必须删；高度带不能吃掉腿和躯干，
-        # 半径不超过足迹（正前方只有 D435，闯进足迹的人要靠它停下）
+        # 走路时前摆的手（实测离 base_link 水平 ≤0.48 m、高 0.57~0.73 m）必须删；高度带不能吃掉腿和躯干
+        # （正前方只有 D435，闯进足迹的人要靠腿 / 躯干的点停下）。2026-10-26 robot_radius 改 0.40 后半径仍 0.50：
+        # 手到 0.48 m，不能跟着缩；足迹外 0.40~0.50 的环只少了 0.45~0.85 m 高度带
         self.assertGreaterEqual(f['self_crop_radius'], 0.48)
-        self.assertLessEqual(f['self_crop_radius'], self.local['robot_radius'])
+        self.assertLessEqual(f['self_crop_radius'], 0.50)
+        self.assertLessEqual(f['self_crop_radius'], self.local['robot_radius'] + 0.10)
         self.assertLessEqual(f['self_crop_z_min'], 0.57)
         self.assertGreaterEqual(f['self_crop_z_max'], 0.73)
         self.assertGreaterEqual(f['self_crop_z_min'], 0.40)
