@@ -51,12 +51,13 @@ Never spawn multiple subagents for routine debugging.
 - 1.3 实测指标：定位 v3.0.0 导航 1 h 全部 0~4.2 cm；到点平均 12.9 cm、最大 19.8 cm、航向 ≤2.8°（v1.0.0 测，v3.0.0 未重测）；costmap 残影和近身噪点清零。
 
 **2. 硬性规则（动手前必读）**
-- 2.1 绝对禁止后退：G1 收到负 vx 会摔倒，四道防线不得放宽。
+- 2.1 绝对禁止后退：带 Thor 背包的 G1 收到负 vx 会摔倒，四道防线不得放宽；仓库默认值一律不后退。唯一例外是无背包的 Orin 30524（实测能退），只经本机覆盖文件放开 BackUp 脱困。
 - 2.2 编译与部署：只在 Thor 编译；部署要用户同意；用 `deploy_to_robot.sh`；运行时只能引用 install（src 会被删）。
 - 2.3 重启：只用 `g1_service.sh restart`；**重启前机器人必须在原点、朝向约 0°，重启后用激光核对定位**。
 - 2.4 DDS：启动栈和手动跑 `ros2` 前都要 source `dds_env.sh`。
 - 2.5 坐标系与传感器：TF 结构、高度基准、MID360 倒装且正前方被头挡住、D435 下俯 47.6°。
 - 2.6 G1 运动特性：**能原地转**（转一次偏 4~17 cm）；`min_vx 0.3` 没验证；`stateful` 必须为 true。
+  以上是带 Thor 背包的 G1；**无背包的 Orin 30524**：|wz|<0.30 完全不转，原地转实际绕右侧 ~0.28 m 的点画圈，本机就地改 `min_wz 0.32`、`xy_goal_tolerance 0.20`（10-24）。
 
 **3. 问题与解决记录**
 - 3.1 建图与 LIO
@@ -101,7 +102,7 @@ Never spawn multiple subagents for routine debugging.
 - 3.6 09-17 交接里的遗留项 → RealSense 参数警告、禁行区节点重复等，状态未核实。
 
 **4. v3.0.0 已知问题（按优先级）**
-- 4.1 导航时 NDT 沿走廊拉偏定位：根因已修并实机验证（3.2.9，10-08）；剩守护本身的老问题和前端不显示 need_reloc。
+- 4.1 导航时 NDT 沿走廊拉偏定位：根因已修并实机验证（3.2.9，10-08）；剩守护本身的老问题。10-24 加跳变检查锁死解除 `JumpRelock`（Orin 上反复锁死），代码 + 单测完成，未部署。
 - 4.2 定位总从地图原点初始化，不看分数；离原点几米处重启仍会错，防呆还要做。
 - 4.3 到点原地转时身体位移，是剩余到点误差的主要来源。
 - 4.4 RPP 不会绕障，没测过有人挡路。
@@ -145,7 +146,7 @@ MID360 /livox/lidar（CustomMsg，逐点 offset_time）+ IMU
   `/cmd_vel_safe` 没有发布者。实机是否被 `/opt/G1/g1_autostart.local.env` 覆盖成 true 未核实。
 - 障碍点云：MID360 的 `/lightning/registered_scan` → `scan_range_filter` → `/lightning/registered_scan_nav`；
   D435 原始点云 → `d435_mark_filter` → `/camera/camera/depth/mark_points`（标记），原始点云另做清除源。
-- 本体：`/odommodestate` → `sport_to_odom` → `/odom`（不发 TF，只在导航模式运行）；`/lf/bmsstate` → `/battery_state`。
+- 本体：`/odommodestate` → `sport_to_odom` → `/odom`（不发 TF，只在导航模式运行；10-24 起是 C++ 版，Python 版 `sport_to_odom.py` 保留作对照，Orin 上 Python 版 ~50 Hz 输入就占 15% CPU）；`/lf/bmsstate` → `/battery_state`。
 - 模式管理：`robot.launch.py`（`start_backend:=true`）里由 robot_status_manager 经 launch_manager 启停定位/导航/建图，
   前端切模式走 `/mode_set`；地图取数据库当前地图（`~/maps/db.sqlite`），取不到才用 `map_dir`。
   `start_backend:=false` 时才由顶层 launch 直接启动定位和导航（前端就不能切模式了）。
@@ -159,7 +160,7 @@ MID360 /livox/lidar（CustomMsg，逐点 offset_time）+ IMU
 |---|---|
 | **Thor 128.146**（`unitree@192.168.128.146`，`/opt/G1/lighting_ws`，aarch64 / Ubuntu 24.04 / jazzy） | 主测机，**v3.0.0**：v1.0.0 全部部署于 10-06，10-08 又部署了 lightning（定位修复 3.2.9，已实机验证；同日再部署 g2p5 扩容修复 3.1.7）。sudo 要密码（服务启停免密）；开机自启 unit 指向 install；D435 序列号与默认值一致 |
 | **Thor 112.70**（10-15 起 `192.168.1.103` 直连；阿里云 10-20 起 `ssh g1-thor` = `-p 30422 unitree@47.108.223.180`，原 45022，tegra-ubuntu，wlP1p1s0） | 10-15 核对：`nav2_params.yaml` 与 `4213f93`（v1.0.0 导航）md5 一致，lightning 仍是 10-08 修复前的版本（无 3.2.9），src 已删。手已改装。D435 线易松（10-15 开机没认到，重插后 USB 3 正常）。sudo 免密。D435i 序列号 317622075180，写在 `/opt/G1/g1_autostart.local.env` |
-| **Orin 30524**（无 Thor 的 G1，`ssh g1-orin` = `-p 30524 unitree@47.108.223.180`，WiFi 192.168.1.109，eth0 = 192.168.123.164 即 G1 自带 PC2） | 10-20 部署当前工作区（v3.0.0 + 未提交的 3.3.6 keepout 修复）。JetPack 5.1.1 / Ubuntu 20.04 装不了 jazzy → 栈跑在常驻容器 `g1`（镜像 `g1-jazzy`，24.04 + jazzy），见 `tools/deploy/orin_docker/README.md`；手动 ros2 用 `/opt/G1/docker/g1_docker.sh shell`，**不要执行 `g1_service.sh install`**。本机覆盖：`/opt/G1/cyclonedds_g1.local.xml`（eth0）、`G1_MID360s_config.local.json`（host_ip .164）、local.env（D435i 250122078132）。语义地图 CPU 推理。sudo 要密码（服务启停免密）。**还没有地图**。另有别人的 `xysj-robot` 服务（unitree_sdk2，DDS domain 0），不要动 |
+| **Orin 30524**（无 Thor 的 G1，`ssh g1-orin` = `-p 30524 unitree@47.108.223.180`，WiFi 192.168.1.109，eth0 = 192.168.123.164 即 G1 自带 PC2） | 10-20 部署当前工作区（v3.0.0 + 未提交的 3.3.6 keepout 修复）。JetPack 5.1.1 / Ubuntu 20.04 装不了 jazzy → 栈跑在常驻容器 `g1`（镜像 `g1-jazzy`，24.04 + jazzy），见 `tools/deploy/orin_docker/README.md`；手动 ros2 用 `/opt/G1/docker/g1_docker.sh shell`，**不要执行 `g1_service.sh install`**。本机覆盖：`/opt/G1/cyclonedds_g1.local.xml`（eth0）、`G1_MID360s_config.local.json`（host_ip .164）、local.env（D435i 250122078132）。语义地图 CPU 推理。sudo 要密码（服务启停免密）。在用地图 `1792742282012`（10-23 建）。另有别人的 `xysj-robot` 服务（unitree_sdk2，DDS domain 0），不要动。**这台是没有 Thor 背包的 G1**，本文其余实测（2.6 运动特性、3.4 到点、桥接 / RPP 参数）都来自带 Thor 背包的 G1，不能直接照搬；本机参数（10-24 16:10 起）全部在覆盖文件里，**不再就地改 install**：`/opt/G1/nav_bridge.local.yaml`（`min_wz 0.32`、`max_reverse_vx 0.3`、`min_reverse_vx 0.25`）和 `/opt/G1/nav2_params.local.yaml`（`rotate_to_heading_angular_vel 0.35`、`xy_goal_tolerance 0.20`、BackUp 行为树、smoother 下限 −0.3），源在仓库 `tools/deploy/orin_docker/`，local.env 的 `G1_ROBOT_ARGS` 用 `bridge_params_overlay:=` / `nav_params_overlay:=` 加载；改了源要手动拷到 `/opt/G1/`。部署 g1_nav_bridge / aid_navigation2 不会再冲掉（旧 install 备份 `/opt/G1/backup_1024b/`）。D435 彩色同事已不用：local.env 里 `realsense_enable_color:=false realsense_depth_profile:=848x480x15`（10-24 部署 robot_bringup 后生效：realsense 节点 CPU 99% → 8%，整机空闲 22% → 43%）。重启照常用 `g1_service.sh restart`（清理脚本是纯 Python，主机上能跑）。**停服务不清残留会留下整套孤儿导航栈**（ROS 进程在容器 cgroup 里，systemd 够不着；10-24 实测 09:18 的导航栈与新栈同名并存，负载 20 → 35），10-24 起 `g1_docker.sh service-stop` 自带清理，见 `tools/deploy/orin_docker/README.md` |
 | 开发机（本地） | x86 / Ubuntu 22.04 / humble。**默认不在本地编译**，本地 install 不完整、不可用；用户授权时可在 scratchpad 编 lightning 做离线回放（5.2）。Meteor Lake 核显在 6.8 内核下会 GPU hang 导致整机卡死（`journalctl -b -1 -k | grep -E 'i915|DMAR|GPU HANG'`） |
 
 ### 1.3 实测指标（128.146）
@@ -179,6 +180,10 @@ MID360 /livox/lidar（CustomMsg，逐点 offset_time）+ IMU
 - BT 里的 `BackUp` 恢复节点已删除，`backup` / `drive_on_heading` 同样不得进 BT。被困时只能靠清图 / Spin / Wait。
 - `g1_cmdvel_to_sport` 对 `vx<0` 硬钳位为 0。
 - 规划器不能用 REEDS_SHEPP 之类会规划倒车的模型。
+- **例外：无 Thor 背包的 Orin 30524**（10-24 实测能稳定后退，2.6）。只用本机覆盖文件放开 BT 脱困后退，仓库默认值不变，测试 `test_never_reverse` 照旧守着：
+  `tools/deploy/orin_docker/nav2_params.local.yaml`（换成带 `BackUp` 的行为树 `navigate_w_recovery_backup_…xml`，退 0.25 m / 0.3 m/s；smoother `min_velocity[0] −0.3`）
+  + `nav_bridge.local.yaml`（`max_reverse_vx 0.3`、`min_reverse_vx 0.25`，只允许直线后退）。RPP `allow_reversing` 仍为 false。三处数值由 `test_orin_backup_overlay` 守着要一致。
+  **不得把这两个文件或带 BackUp 的行为树用到带背包的 G1 上。**
 
 ### 2.2 编译与部署
 - **不在本地编译**（用户明确要求）：本地只改代码，编译、跑 gtest/pytest 一律在 Thor 上做；Thor 离线就如实说"未编译"。
@@ -257,6 +262,21 @@ MID360 /livox/lidar（CustomMsg，逐点 offset_time）+ IMU
 - 腿式里程计 `/odom`：本体时钟与 Thor 差 <30 ms；和 LIO 比（20 s / 5 m 窗口）平移误差 p50 6.7 cm、p95 28 cm，
   误差/行程 p50 4.9%、p95 10.9%，航向 p50 1.3°、p95 6°；长期航向稳（20 min 差 2°）。**原地踏步时估不准位移**。
 - `goal_checker stateful: true` 必须保留：用户实测 `false` 会到不了点（不能慢速微调，来回绕）——**别再提**。
+- **以上都是带 Thor 背包的 G1 的数据。没有 Thor 背包的 G1（Orin 30524）10-24 实测原地转**（临时起第二个 `cmdvel_to_sport` 实例，
+  `min_wz 0 / wz_stop 0`，只发 vx=0；转角取 `/odommodestate` IMU 航向，位移取 map->base_link，每档 6 s）：
+  - **|wz| ≤ 0.29 完全不转**（0.15~0.29 共 7 档，航向变化 ≤0.1°），**0.30 起转**，0.1~0.2 s 响应：是硬死区，不是慢慢转。
+  - 实际/指令约 0.7~0.8：0.30 → 0.21 rad/s、0.35 → 0.28、0.40 → 0.42、0.50 → 0.41、0.60 → 0.47。
+  - 身体位移转 70~170° 时 13~41 cm，**不随转速降低而减小**（0.30~0.35 档 27~41 cm），比带背包的 4~17 cm 大。
+  - 据此该机改：桥接 `min_wz 0.6 → 0.32`（`/opt/G1/nav_bridge.local.yaml`）、RPP `rotate_to_heading_angular_vel 0.6 → 0.35`（install 就地改）；仓库默认仍是 0.6，给带 Thor 背包的 G1。
+    改的起因：该机 10-22 / 10-23 到点前在目标周围半径 ~0.23 m 绕圈 50~75 s 进不了 0.10 容差（RPP 给 wz 0.3~0.56，被抬到 0.6 后转过头），
+    `progress_checker`（0.10 m / 15 s）把绕圈当作有进展，不会自动中止。
+  - **改 min_wz 后（11:42 lmw 新图）仍绕圈**：`/cmd_vel` 实测是纯原地转 `vx 0 / wz -0.35`，但该机身体绕自己右侧约 0.28 m 的点画圈（LIO 雷达位置同样在走，不是定位算错），
+    目标落在圈心附近时目标方位始终在右侧约 90°（>45°）→ RPP 一直原地转，最近只到 0.15 m，绕了 2.5 min。
+    于是该机 install 再改 `xy_goal_tolerance 0.10 → 0.20`（`stateful: true` 进容差即锁位置、只转航向），代价是到点精度约 0.2 m。**改后效果未验证**。
+  - **后退实测（10-24 15:50，该机，有人扶）**：直接发 `SetVelocity` 负 vx（绕过桥，10 Hz 续发 0.5 s），每档 1.5 s，脚本 / 数据 `/opt/G1/bags/replay/reverse_test.py`、`reverse_test_20261024_155044/`：
+    vx −0.1 完全不动（死区）；−0.2 退 0.11~0.13 m（起步延迟 0.79 s，稳态约 0.13 m/s）；−0.3 退 0.25 m（延迟 0.55 s，稳态约 0.21 m/s）；
+    姿态偏差 ≤3.8°，侧漂 ≤3 cm、航向 ≤1.6°，发零速后 0.25 s 内停住（再滑 2~4 cm）。**没摔**。2.1 的禁令来自带 Thor 背包的 G1，仓库防线未改。
+    据此 10-24 16:10 在该机放开 BT BackUp 脱困（2.1 例外）：清图 → 退 0.25 m → Spin → Wait。`ros2 param get` 已核对生效；**真实被困时的 BackUp 效果未验证**。
 
 ## 3. 问题与解决记录（截至 v3.0.0）
 
@@ -356,7 +376,7 @@ glog 默认缓冲 INFO 最长 30 s，进程被信号杀死时丢失。解决：`
   - NDT 输入投影历史关键帧的实现修正：原实现在 `scan_undistort_` 上原地追加，而关键帧与它共用 CloudPtr，
     当前帧是新关键帧时遍历自身同时 push_back（未定义行为）；改为副本上投影并跳过自身，`loc_input.proj_kfs` 开关（默认 true）。
   - `/initialpose` 重定位（map 系 base_link 平面位姿经 `BaseTFPublisher::BasePoseToLidar` 换成雷达位姿，±15° / 3° 航向搜索，
-    成功后 `pgo_->Reset()`，失败时不退回功能点初始化）：**未实机验证**。
+    成功后 `pgo_->Reset()`，失败时不退回功能点初始化）：**10-24 Orin 30524 实机验证可用**——部署重启时机器人不在原点，原点初始化收敛到错误位姿（横滚 -40°、激光吻合 0.47），前端"模式"页"在地图上拖动设置位姿"给大致位姿 (3.61, 0.2, 180°) 后，收敛到 base_link (3.24, 0.59, -171°)，激光吻合 0.948、峰值清晰（初值差 ~0.45 m / 9° 由航向搜索 + NDT 纠正）。
   - `run_loc_offline` 新增 `--odom_topic/--odom_time_offset/--odom_lidar_offset`，测试专用 `--inject_ndt_bias "bx by t0 t1"`（注入 NDT 偏差做 A/B）。
   - 测试：`test/test_loc_guard.cc`（gtest，闭环模拟走廊漂移）、`test/test_g1_loc_guard_config.py`。
 - 验证（离线 A/B，0930b 包，末帧对原点激光真值）：只告警 + 投影 0.36 m；只告警 + 无投影 **3.14 m**（纯当前帧更差，投影不是元凶）；
@@ -470,8 +490,8 @@ glog 默认缓冲 INFO 最长 30 s，进程被信号杀死时丢失。解决：`
 - `d435_mark_filter.yaml`：min_depth 0.40、neighbor 开（0.08 / 3）、temporal 关、self_crop 0.5 m × 0.45~0.85 m、floating 关。
 - MID360：`scan_range_filter` 0.25 m + base_link 水平 0.5 m；`livox_mark` ≥0.15 m / 2.5 m；global `observation_persistence 0.2`。
 - launch `use_realsense_obstacles:=false` 时两张图里的 D435 源都摘掉（含 `drop_d435_clear`）。前提：栈跑在 spdp DDS 下，否则多订 D435 会把点云挤上网线。
-- 当前膨胀代价（r = robot_radius 0.50，inflation_radius 0.75）：local k=8 → 0.55 m 168、0.60 113、0.65 75、0.70 50、0.75 34；
-  global k=6 → 0.55 186、0.65 102、0.75 56；再外为 0。梯度带宽 0.25 m。`nav2_params.yaml` 里旧注释按 r=0.30 算（0.45→76、边界 51），10-14 已订正。
+- 当前膨胀代价（r = robot_radius 0.50，inflation_radius 0.85，10-25 由 0.75 加大）：local k=8 → 0.55 m 168、0.60 113、0.65 75、0.70 50、0.75 34、0.85 15；
+  global k=6 → 0.55 186、0.65 102、0.75 56、0.85 31；再外为 0。梯度带宽 0.35 m。`nav2_params.yaml` 里旧注释按 r=0.30 算（0.45→76、边界 51），10-14 已订正。
 - 代价常识：`252·exp(-k(d-r))` 只在 inflation_radius 内成立；254 lethal、253 内切带、255 未知。nav2 没有"被困"检测；
   `collision_margin_distance` 是软惩罚，不是硬安全圈。
 
@@ -516,7 +536,7 @@ Nav2 报"到达"，人却停在偏处。10-03 实机去 (−4.21, 0.16, 0°) 停
 - 原 MPPI 参数整段保留为 `FollowPathMPPI`（不在 `controller_plugins` 里，不会加载）；回退时把名字改回 `FollowPath`。
 - `goal_checker`：`xy_goal_tolerance 0.10`、`yaw_goal_tolerance 0.10`、`stateful: true`。
 - velocity_smoother：`max_velocity [0.45, 0, 0.9]`，`max_decel [-2.0, -0.35, -5.0]`，OPEN_LOOP，死区 0。
-- 桥接：`turn_min_vx 0.0`、`min_wz 0.6`、`min_vx 0.3`。
+- 桥接：`turn_min_vx 0.0`、`min_wz 0.6`、`min_vx 0.3`（单机覆盖用 `robot.launch.py bridge_params_overlay:=<yaml>`，叠在 nav_bridge.yaml 之后）（带 Thor 背包的 G1；无背包的 Orin 30524 本机改为 `min_wz 0.32` + RPP 原地转 0.35 + `xy_goal_tolerance 0.20`，见 2.6）。
 
 #### 3.4.5 别再试
 - `goal_checker stateful: false`（用户实测到不了点）。
@@ -585,7 +605,8 @@ BGE-M3 从本地目录 `/home/unitree/models/bge-m3` 加载（Thor 不方便联�
   守护全程 GOOD、跳变检查 0 次。10-06 的两次（3.2.8）没有原始数据，实机未再复现，按同因处理。
 - 112.70 还是 09-30 的代码，没有这个修复（4.9）。
 - 守护的老问题仍在：慢拉（每个 60 s 窗口 <0.2 m）发现不了；冻结后不会自动恢复；前端不显示 `/lightning/loc_status` 的 need_reloc。
-- 单帧跳变检查（0.2 m）在初值偏差大时会挡住所有正确修正（3.2.9：修盲区前，线上配置因此一直偏 0.4~0.6 m）。修复后没再触发，暂时保留。
+- 单帧跳变检查（0.2 m）在初值偏差大时会挡住所有正确修正（3.2.9：修盲区前，线上配置因此一直偏 0.4~0.6 m）。128.146 修复后没再触发；**Orin 30524 上反复锁死**（10-23 17:53 偏 0.55 m 锁 25 min，10-24 15:00 偏 0.5 m 锁到结束，守护全程 GOOD）。
+  10-24 加 `JumpRelock`（`loc_guard.h`，配置 `loc_guard.relock_*`）：连续 5 帧被拒、地图系修正量一致（±0.15 m / 2°）、期间 LIO **净位移** ≥0.5 m（原地转 / 静止不算，起点开阔区的歧义不能放）、分值 ≥0.95×近 50 帧中位数、修正 ≤1 m / 10° 时整帧采信 NDT 并重置守护 / PGO；采信后 5 帧内又被拒 3 帧（NDT 在相对当前位姿往一个方向拉，09-29 走廊那种）就撤回并停用到人工重定位；连续被拒 15 帧或停用时 `need_reloc`=true（前端红色"需要重定位"），`/lightning/loc_status` 多 `relocks`、`jump_reject_run`。离线复算 `tools/loc_debug/sim_relock.py`（16 段 glog）：两次锁死在 17:56:43、15:01:05 解除且验证通过，静止 / 原地转的歧义都不解除。gtest 23/23（Orin 容器 build 目录编译）。**未部署、未实机验证**。
 
 ### 4.2 定位初始化总是从地图原点开始，没有防呆
 - `run_loc_online` 写死 `SetInitPose(SE3())`，`Localize()` 不看分数；前端"定位"按钮在已定位时也会重启定位。
@@ -600,7 +621,7 @@ BGE-M3 从本地目录 `/home/unitree/models/bge-m3` 加载（Thor 不方便联�
   或转向时加少量前进速度抵消后退（需要标定）。
 
 ### 4.4 RPP 不会局部绕障
-只按碰撞预测停车，绕障靠全局重规划（BT 只在路径失效时重规划）。**还没测过有人 / 障碍物挡路的情况**。
+只按碰撞预测停车，绕障靠全局重规划（BT 每 2 s 或路径失效时重规划；2026-10-26 前只在失效时，规划后才出现的障碍离路径 0.4~0.5 m 也不会改道）。**还没测过有人 / 障碍物挡路的情况**。
 
 ### 4.5 新方案没有仿真
 `nav_goal_sim` 是 humble 版，没有按当前方案（2D + RPP + 原地转，v1.0.0 起）重跑。
