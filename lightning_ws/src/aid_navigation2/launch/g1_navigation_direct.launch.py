@@ -11,8 +11,11 @@ D435 两个标记源（realsense_mark / realsense_mark_tall）吃 g1_nav_bridge/
 use_d435_mark_filter=false 时两个标记源改回原始点云（A/B 用）。realsense_clear 始终吃原始点云。
 MID360 障碍在 mid360_voxel_layer（STVL，2026-09-24 从 2D obstacle_layer 迁移），STVL 没有 obstacle_min_range，
 所以始终另起 g1_nav_bridge/scan_range_filter 剔除离雷达 0.25 m 内的机身回波，以及 base_link 水平 0.5 m（足迹半径）内的点。
-开关都是默认值时，yaml 原封不动交给 nav2，`ros2 param get` 与文件一一对应。
+nav_params_overlay=<yaml> 时把该文件按键递归合并到 nav2_params.yaml 之上（列表整体替换），给单台机器的本机参数用
+（如无 Thor 背包的 Orin 30524：/opt/G1/nav2_params.local.yaml），不在仓库里，部署不会覆盖。
+开关都是默认值且没有覆盖文件时，yaml 原封不动交给 nav2，`ros2 param get` 与文件一一对应。
 """
+import copy
 from pathlib import Path
 import tempfile
 
@@ -68,6 +71,18 @@ def raw_mark(nav):
     return changed
 
 
+def merge_overlay(base, overlay):
+    """把 overlay 按键递归合并进 base（dict 递归，其余类型含列表整体替换）；返回是否发生改动。"""
+    changed = False
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            changed = merge_overlay(base[key], value) or changed
+        elif base.get(key) != value:
+            base[key] = copy.deepcopy(value)
+            changed = True
+    return changed
+
+
 def setup(context):
     get = lambda name: LaunchConfiguration(name).perform(context)  # noqa: E731
     nav_share = Path(get_package_share_directory('aid_navigation2'))
@@ -86,10 +101,16 @@ def setup(context):
               + ([] if use_d435 else ['stvl_voxel_layer']))
     use_filter = use_d435 and get('use_d435_mark_filter') == 'true'
     use_raw = use_d435 and not use_filter
-    if layers or use_raw:
+    overlay_file = get('nav_params_overlay')
+    if overlay_file and not Path(overlay_file).expanduser().is_file():
+        raise ValueError(f'nav_params_overlay 不存在：{overlay_file}')
+    if layers or use_raw or overlay_file:
         nav = yaml.safe_load(nav_file.read_text())
         changed = drop_layers(nav, layers)
         changed = (use_raw and raw_mark(nav)) or changed
+        if overlay_file:
+            overlay = yaml.safe_load(Path(overlay_file).expanduser().read_text()) or {}
+            changed = merge_overlay(nav, overlay) or changed
         if changed:
             nav_file = Path(tempfile.mkdtemp(prefix='g1_nav_')) / 'nav.yaml'
             nav_file.write_text(yaml.safe_dump(nav, sort_keys=False, allow_unicode=True))
@@ -113,7 +134,7 @@ def setup(context):
 
     return mark_filter + [
         scan_filter,
-        LogInfo(msg=f'G1 nav2 参数：{nav_file}（已去掉的层：{layers or "无"}，'
+        LogInfo(msg=f'G1 nav2 参数：{nav_file}（本机覆盖：{overlay_file or "无"}，已去掉的层：{layers or "无"}，'
                     f'D435：{"开" if use_d435 else "关"}，D435 标记过滤：{"开" if use_filter else "关"}）'),
         LogInfo(msg='注意：collision_monitor 已关闭，仍保留 Nav2 障碍层；运动必须手动使能。',
                 condition=IfCondition('true' if get('use_collision_monitor') == 'false' else 'false')),
@@ -141,4 +162,6 @@ def generate_launch_description():
                               description='false：两张图的 STVL 去掉 D435 源，只靠 MID360'),
         DeclareLaunchArgument('use_d435_mark_filter', default_value='true', choices=['true', 'false'],
                               description='false：D435 标记源改回原始点云（不剔除孤立飞点，A/B 用）'),
+        DeclareLaunchArgument('nav_params_overlay', default_value='',
+                              description='合并到 nav2_params.yaml 之上的本机参数文件（空 = 不合并）'),
         OpaqueFunction(function=setup)])

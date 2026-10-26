@@ -3,6 +3,7 @@ import ast
 import copy
 import importlib.util
 from pathlib import Path
+import re
 import unittest
 import yaml
 
@@ -279,6 +280,71 @@ class G1ParamTests(unittest.TestCase):
         self.assertNotIn('<BackUp', bt)      # 恢复行为不得倒车
         bridge = (SRC / 'g1_nav_bridge/src/cmdvel_to_sport.cpp').read_text()
         self.assertIn('velocity[0] = 0.0F;', bridge)   # 桥接层兜底钳位
+        self.assertIn('declare_parameter<double>("max_reverse_vx", 0.0)', bridge)   # 代码默认不放开
+        bp = yaml.safe_load((SRC / 'g1_nav_bridge/config/nav_bridge.yaml').read_text())
+        self.assertEqual(bp['g1_cmdvel_to_sport']['ros__parameters']['max_reverse_vx'], 0.0)
+        self.assertTrue(self.nav['bt_navigator']['ros__parameters']['default_nav_to_pose_bt_xml']
+                        .endswith('/navigate_w_recovery_and_replanning_only_if_path_becomes_invalid.xml'))
+
+    def test_bt_periodic_replanning(self):
+        """两棵导航树都要定时重规划：只靠 IsPathValid 时，规划后才出现的障碍只要不把路径压进 253 就不改道。"""
+        for name in ('navigate_w_recovery_and_replanning_only_if_path_becomes_invalid.xml',
+                     'navigate_w_recovery_backup_and_replanning_only_if_path_becomes_invalid.xml'):
+            bt = (ROOT / 'behavior_trees' / name).read_text()
+            timer = re.search(r'<PathExpiringTimer seconds="([\d.]+)" path="\{path\}"/>', bt)
+            self.assertIsNotNone(timer, name)
+            self.assertLessEqual(float(timer.group(1)), 5.0)
+            self.assertIn('<IsPathValid path="{path}"/>', bt)
+
+    def test_orin_backup_overlay(self):
+        """无 Thor 背包的 Orin 30524 只经本机覆盖文件放开后退：BT BackUp、smoother 下限、桥接上限三处要一致。"""
+        orin = SRC.parent / 'tools/deploy/orin_docker'
+        nav = copy.deepcopy(self.nav)
+        overlay = yaml.safe_load((orin / 'nav2_params.local.yaml').read_text())
+        self.assertTrue(direct.merge_overlay(nav, overlay))
+        self.assertFalse(direct.merge_overlay(nav, overlay))   # 幂等
+        c = nav['controller_server']['ros__parameters']
+        self.assertFalse(c['FollowPath']['allow_reversing'])    # 正常行走仍不倒车
+        self.assertEqual(c['goal_checker']['xy_goal_tolerance'], 0.3)
+        self.assertEqual(c['goal_checker']['yaw_goal_tolerance'], 0.3)   # 只改覆盖到的键
+        self.assertEqual(c['FollowPath']['rotate_to_heading_angular_vel'], 0.9)
+        bt_name = nav['bt_navigator']['ros__parameters']['default_nav_to_pose_bt_xml'].rsplit('/', 1)[1]
+        bt = (ROOT / 'behavior_trees' / bt_name).read_text()
+        backup = re.search(r'<BackUp [^>]*backup_dist="([\d.]+)" backup_speed="([\d.]+)"', bt)
+        self.assertIsNotNone(backup)
+        dist, speed = map(float, backup.groups())
+        self.assertLessEqual(dist, 0.3)
+        self.assertNotIn('DriveOnHeading', bt)
+        smoother_min = nav['velocity_smoother']['ros__parameters']['min_velocity']
+        bp = yaml.safe_load((orin / 'nav_bridge.local.yaml').read_text())['g1_cmdvel_to_sport']['ros__parameters']
+        self.assertEqual(bp['min_wz'], 0.32)
+        # 走路时 wz 原样透传（走路没有原地转的死区，10-25 motion_test）；wz_stop 0.05 那轮更差，守住 0.15
+        self.assertEqual(bp['walk_min_wz'], 0.0)
+        self.assertEqual(bp['wz_stop'], 0.15)
+        self.assertLessEqual(c['FollowPath']['rotate_to_heading_angular_vel'],
+                             nav['velocity_smoother']['ros__parameters']['max_velocity'][2])
+        # 走路蟹行补偿：只有 local costmap（controller）换成 base_link_nav，且帧名 / 角度与桥的节点一致
+        bridge_default = yaml.safe_load((SRC / 'g1_nav_bridge/config/nav_bridge.yaml').read_text())
+        crab_default = bridge_default['g1_crab_comp_frame']['ros__parameters']
+        crab_orin = yaml.safe_load((orin / 'nav_bridge.local.yaml').read_text())['g1_crab_comp_frame']['ros__parameters']
+        self.assertEqual(crab_default['crab_deg'], 0.0)              # 仓库默认恒等，带 Thor 背包的 G1 不变
+        self.assertGreater(crab_orin['crab_deg'], 5.0)
+        self.assertLess(crab_orin['crab_deg'], 15.0)                 # 实测 +10.3~11.1°
+        local_frame = nav['local_costmap']['local_costmap']['ros__parameters']['robot_base_frame']
+        self.assertEqual(local_frame, crab_default['child_frame'])
+        self.assertEqual(crab_default['parent_frame'], 'base_link')
+        self.assertEqual(nav['global_costmap']['global_costmap']['ros__parameters']['robot_base_frame'], 'base_link')
+        for server in ('bt_navigator', 'behavior_server'):
+            self.assertEqual(nav[server]['ros__parameters']['robot_base_frame'], 'base_link')
+        # 10-25 起不再要求贴着 min_wz：慢转（0.35）逆时针漂 0.26~0.67 m，比转过头更糟
+        self.assertGreaterEqual(c['FollowPath']['rotate_to_heading_angular_vel'], bp['min_wz'])
+        self.assertAlmostEqual(smoother_min[0], -bp['max_reverse_vx'])
+        self.assertLessEqual(speed, bp['max_reverse_vx'])            # 不被钳
+        self.assertLessEqual(bp['max_reverse_vx'], 0.3)              # 实测只到 0.3
+        self.assertGreaterEqual(bp['min_reverse_vx'], 0.2)           # 实测 -0.1 不动
+        self.assertLessEqual(bp['min_reverse_vx'], bp['max_reverse_vx'])
+        for f in (ROBOT_LAUNCH, NAV_BRIDGE_LAUNCH, LAUNCH):          # 覆盖文件参数逐层透传
+            self.assertIn('nav_params_overlay', f.read_text())
 
     def test_keepout_layer_present_by_default(self):
         for p in (self.local, self.globl):

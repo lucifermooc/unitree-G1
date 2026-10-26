@@ -1,0 +1,53 @@
+
+<!--
+  与 navigate_w_recovery_and_replanning_only_if_path_becomes_invalid.xml 相同，只在恢复轮换里多一个 BackUp（直线后退脱困）。
+  （两者 2026-10-26 起都是每 2 s 或路径失效时重规划，见 PathExpiringTimer。）
+  只给能后退的 G1 用：无 Thor 背包的 Orin 30524（2026-10-24 实测 -0.2 / -0.3 稳定后退，-0.1 不动），
+  由本机 nav_params_overlay 的 bt_navigator.default_nav_to_pose_bt_xml 选用。带 Thor 背包的 G1 倒走会摔，不得使用本文件（CLAUDE.md 2.1）。
+  还要同时放开：velocity_smoother min_velocity[0] < 0、g1_cmdvel_to_sport max_reverse_vx > 0，否则后退速度在下游被钳为 0、BackUp 超时失败。
+  BackUp 用 local costmap 足迹检查后方，会撞就不退。0.3 m/s 实际约 0.21 m/s、起步延迟约 0.55 s，0.25 m 约 1.7 s。
+-->
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+      <PipelineSequence>
+        <RateController hz="1.0" name="RateControllerComputePathToPose">
+          <RecoveryNode number_of_retries="1" name="RecoveryComputePathToPose">
+            <Fallback name="FallbackComputePathToPose">
+              <ReactiveSequence name="CheckIfNewPathNeeded">
+                <!-- 2026-10-26 加：路径满 2 s 就重规划。只靠 IsPathValid 时，路径要进 253（避障半径内）才算失效，
+                     规划后才看到 / 移近的障碍离路径 0.43~0.5 m 时路径一直不变（10-25 21:54 S 弯贴南墙）。 -->
+                <Inverter>
+                  <PathExpiringTimer seconds="2" path="{path}"/>
+                </Inverter>
+                <Inverter>
+                  <GlobalUpdatedGoal/>
+                </Inverter>
+                <IsPathValid path="{path}"/>
+              </ReactiveSequence>
+              <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+            </Fallback>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+          </RecoveryNode>
+        </RateController>
+        <RecoveryNode number_of_retries="1" name="RecoveryFollowPath">
+          <FollowPath path="{path}" controller_id="FollowPath"/>
+          <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+        </RecoveryNode>
+      </PipelineSequence>
+      <ReactiveFallback name="FallbackRecoveries">
+        <GoalUpdated/>
+        <RoundRobin name="RecoveryActions">
+          <Sequence name="ClearingActions">
+            <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
+          </Sequence>
+          <!-- 清图之后先退：贴墙 / 起点被占时原地 Spin 会撞检失败（10-23 Orin 贴墙 0.3 m 被困） -->
+          <BackUp name="BackUpRecovery" backup_dist="0.25" backup_speed="0.3" time_allowance="5"/>
+          <Spin name="SpinRecovery" spin_dist="1.57"/>
+          <Wait name="WaitRecovery" wait_duration="5"/>
+        </RoundRobin>
+      </ReactiveFallback>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

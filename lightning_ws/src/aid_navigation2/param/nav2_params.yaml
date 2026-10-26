@@ -199,7 +199,7 @@ controller_server:
         near_goal_distance: 0.5
         # 下面两个必须与 local_costmap 的 inflation_layer 完全一致，否则本 critic 复算的
         # 代价与地图不符，避障行为会莫名其妙。
-        inflation_radius: 0.75
+        inflation_radius: 0.85
         cost_scaling_factor: 8.0
 
       PathAlignCritic:
@@ -261,7 +261,10 @@ planner_server:
       max_iterations: 1000000               # maximum total iterations to search for before failing (in case unreachable), set to -1 to disable
       max_on_approach_iterations: 1000      # maximum number of iterations to attempt to reach goal once in tolerance
       max_planning_time: 2.0                # max time in s for planner to plan, smooth
-      cost_travel_multiplier: 2.0           # Cost multiplier to apply to search to steer away from high cost areas. Larger values will place in the center of aisles more exactly (if non-`FREE` cost potential field exists) but take slightly longer to compute. To optimize for speed, a value of 1.0 is reasonable. A reasonable tradeoff value is 2.0. A value of 0.0 effective disables steering away from obstacles and acts like a naive binary search A*.
+      # 2026-10-25 2.0 -> 5.0：RPP 严格沿路径走，2.0 时转弯路径贴着膨胀带内侧（离障碍 0.6~0.7 m），
+      # 原地转身体一甩（4~17 cm，Orin 30524 13~41 cm）就进 253 内切带、collision ahead 停车。加大后路径走通道中线。
+      # 10-25 实测 5.0 时路径全程贴在膨胀带外沿（0.84~0.90 m）；再加到 10.0。
+      cost_travel_multiplier: 10.0          # Cost multiplier to apply to search to steer away from high cost areas. Larger values will place in the center of aisles more exactly (if non-`FREE` cost potential field exists) but take slightly longer to compute. To optimize for speed, a value of 1.0 is reasonable. A reasonable tradeoff value is 2.0. A value of 0.0 effective disables steering away from obstacles and acts like a naive binary search A*.
       use_final_approach_orientation: false # Whether to set the final path pose at the goal's orientation to the requested orientation (false) or in line with the approach angle so the robot doesn't rotate to heading (true)
       smoother:
         max_iterations: 1000
@@ -323,13 +326,6 @@ velocity_smoother:
     max_velocity: [0.45, 0.0, 0.9]
     min_velocity: [0.0, 0.0, -0.9]
     max_accel: [0.35, 0.35, 0.60]
-    # 2026-09-21 vx_max 提到 0.7 后必须同步加大减速度：
-    # 原 -0.35 m/s² 从 0.7 停住要 2.0 s / 走 0.70 m，而传感器正前 0.40 m 是盲区。
-    # -0.8 m/s² 把制动距离压到 0.31 m，与盲区同量级。
-    # 2026-10-03 再加大到 [-2.0, -, -5.0]：g1_cmdvel_to_sport 会把 |wz|>=0.15 抬到 0.6（且 vx>=0.2）、vx>=0.05 抬到 0.3，
-    # 缓慢减速段在 G1 上等于"全速再转/再走一阵"——wz 按 0.6 rad/s² 从 0.6 降到 0.15 要 0.75 s，期间实际一直以 0.6 rad/s 转，
-    # 到点停车后朝向多转 ~26°（实机 16:40 多转 21°）。改后停车一两个周期就降到抬速阈值以下。加速限制不变。
-    # 仿真（src/test/nav_goal_sim）：朝向超调 15~27° -> 0~8°。
     max_decel: [-2.0, -0.35, -5.0]
     enable_stamped_cmd_vel: false
     # 不置零：G1 最小有效速度由 g1_cmdvel_to_sport 按方向提升（min_vx/min_wz）。
@@ -347,17 +343,6 @@ local_costmap:
       publish_frequency: 5.0
       transform_tolerance: 0.20
       resolution: 0.05
-      # 物理包络：2026-09-21 卷尺实测 base_link 到机身最前方 0.10 m，机身前后 0.20 m；
-      # 2026-09-22：自清关闭并验证解耦后（tools/nav2_debug/footprint_clearing_sweep.py），
-      # 加大半径不再抹除真实障碍，于是用它覆盖 D435 的几何盲区。
-      # 盲区随障碍高度变（箱顶 0.57 m 最近可见 0.30 m；0.42~0.54 m 最近可见 0.55 m），
-      # 实测物理接触时 costmap 读数约 0.56 m，故取 0.55 才能在接触前停住。
-      # 代价：253 不可通行带 0.55 m 厚，通道净宽需 >1.1 m。窄场地回退 0.40。不要再把它当安全距离用——
-      # robot_radius 同时是 STVL 的 footprint 自清半径，
-      # 设大了会把该半径内的真实障碍当成自身点云抹掉（D435 障碍只有 STVL 一个源，抹掉即消失）。
-      # 安全余量一律由 inflation_radius 承担，它只染代价、不清除任何东西。
-      # 另：D435+mid360 在 base_link 正前 0~0.40 m 无任何点（盲区），
-      # 只要本值 <= 0.40，自清区完全落在盲区内，就不可能吃掉真实障碍。
       robot_radius: 0.50
       footprint_padding: 0.0
       rolling_window: true
@@ -516,13 +501,13 @@ local_costmap:
         # 2026-09-21 对齐旧系统（0.50 / 8.0）：原 0.85/2.0 把障碍外 0.85 m 全染成中高代价，
         # 0.50 m 处仍有 169，RViz 上几乎没有白色，MPPI 的代价地形也被抹平。
         # 公式（d = 到障碍距离，r = robot_radius）：d ≤ r → 253；r < d ≤ inflation_radius → 252·exp(-k·(d-r))；再外为 0。
-        # 当前 r=0.50、k=8：0.55→168、0.60→113、0.65→75、0.70→50、0.75→34，0.75 m 外直接回到白色，
+        # 当前 r=0.50、k=8：0.55→168、0.60→113、0.65→75、0.70→50、0.75→34、0.80→23、0.85→15，0.85 m 外直接回到白色，
         # “只走白色”才成为可执行判据。（2026-10-14 订正：旧注释的 0.45→76 等数字是按 r=0.30 算的。）
         # 改动此处必须同步 MPPI 的 ObstaclesCritic.inflation_radius / cost_scaling_factor。
         cost_scaling_factor: 8.0
-        # 随 robot_radius 同步：梯度带宽 = inflation_radius - robot_radius = 0.25 m（测试要求 0.10~0.40），
-        # 边界代价 34，避免代价从高值直接掉 0 的台阶。
-        inflation_radius: 0.75
+        # 随 robot_radius 同步：梯度带宽 = inflation_radius - robot_radius（测试要求 0.10~0.40），
+        # 避免代价从高值直接掉 0 的台阶。2026-10-25 0.75 -> 0.85（带宽 0.35，边界代价 15）：路径离障碍再远一点。
+        inflation_radius: 0.85
       always_send_full_costmap: true
 
 global_costmap:
@@ -706,7 +691,8 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         # 全局用 6.0（比局部略缓），让 A* 在空旷处更愿意走通道中线；与旧系统一致。
-        # r=0.50、k=6：0.55→186、0.65→102、0.75→56，0.75 m 外为 0。
+        # r=0.50、k=6：0.55→186、0.65→102、0.75→56、0.85→31，0.85 m 外为 0。
+        # 2026-10-25 0.75 -> 0.85：路径离障碍再远一点（与 local 同步）。
         cost_scaling_factor: 6.0
-        inflation_radius: 0.75
+        inflation_radius: 0.85
       always_send_full_costmap: true

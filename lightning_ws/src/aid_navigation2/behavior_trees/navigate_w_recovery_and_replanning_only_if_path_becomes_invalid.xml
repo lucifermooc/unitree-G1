@@ -3,6 +3,7 @@
   This Behavior Tree replans the global path only if the path becomes invalid and it also has
   recovery actions specific to planning / control as well as general system issues.
   This will be continuous if a kinematically valid planner is selected.
+  2026-10-26 起另加 PathExpiringTimer：路径满 2 s 也重规划（文件名沿用旧名，Orin 覆盖文件按名引用）。
 -->
 <root main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
@@ -12,6 +13,11 @@
           <RecoveryNode number_of_retries="1" name="RecoveryComputePathToPose">
             <Fallback name="FallbackComputePathToPose">
               <ReactiveSequence name="CheckIfNewPathNeeded">
+                <!-- 2026-10-26 加：路径满 2 s 就重规划。只靠 IsPathValid 时，路径要进 253（避障半径内）才算失效，
+                     规划后才看到 / 移近的障碍离路径 0.43~0.5 m 时路径一直不变（10-25 21:54 S 弯贴南墙）。 -->
+                <Inverter>
+                  <PathExpiringTimer seconds="2" path="{path}"/>
+                </Inverter>
                 <Inverter>
                   <GlobalUpdatedGoal/>
                 </Inverter>
