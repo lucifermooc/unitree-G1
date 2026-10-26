@@ -33,6 +33,7 @@ START = (0.6, 0.1, -7.0)
 GOALS = [(6.00, -0.94, 180.0), (10.39, 1.02, 180.0), (10.37, -1.46, 90.0)]
 ROT09 = os.path.join(HERE, "ctrl_rot09.yaml")
 ROT09_TOL = os.path.join(HERE, "ctrl_rot09_tol015.yaml")
+SHIM = os.path.join(HERE, "ctrl_shim.yaml")
 A = "-p bridge.mode:=walkmin -p bridge.walk_min_wz:=0.0 -p bridge.walk_wz_stop:=0.0 -p bridge.smooth_s:=0.0"
 COMP = "-p model.yaw_comp_deg:=9.5"
 NAVFRAME = "NAVFRAME"   # 标记：起 crab_comp_sim.py（10°）+ local costmap 用 base_link_nav（= g1_nav_bridge/crab_comp_frame 的接法）
@@ -47,6 +48,9 @@ VARIANTS = {
     "A+B+航向补偿+容差0.15": (f"{A} {COMP}", ROT09_TOL),
     "A+B+base_link_nav": (f"{A} {NAVFRAME}", ROT09),
     "A+B+base_link_nav+容差0.15": (f"{A} {NAVFRAME}", ROT09_TOL),
+    # 远处 MPPI、近目标 RPP（run_shim_test.py）；要先把 aid_nav_shim_controller 的 install 加进 AMENT_PREFIX_PATH
+    "A+航向补偿+shim": (f"{A} {COMP}", SHIM),
+    "A+base_link_nav+shim": (f"{A} {NAVFRAME}", SHIM),
 }
 STATUS = {GoalStatus.STATUS_SUCCEEDED: "OK", GoalStatus.STATUS_ABORTED: "ABORTED", GoalStatus.STATUS_CANCELED: "CANCELED"}
 

@@ -78,12 +78,17 @@ class Bridge:
                 walk_min_wz=0、walk_wz_stop=0、smooth_s=0 = 方案 A（走路时 wz 原样发出）
       pulse     走路时：wz 先做 smooth_s 滑动平均，再用一阶 sigma-delta 变成 0 / ±min_wz 的脉冲，平均值 = 平滑后的 wz
       vy        current 的 wz 规则 + 按横向偏差（1 s 平均）发 vy = -vy_gain * cte
+      deployed  逐行照搬 2026-10-26 机器上的 cmdvel_rewrite.hpp ApplyMinimumVelocity（含后退）：|wz|>=wz_stop 时
+                wz 至少 walk_min_wz（vx>=vx_stop）或 min_wz（原地 / 后退），vx 不抬（只取 max(vx, turn_min_vx)）；
+                否则 vx 抬到 min_vx（后退抬到 min_reverse_vx、钳到 -max_reverse_vx），后退或停止时 wz 清零
     vy_ff > 0 时（任何 mode）：走路时另加前馈 vy = -vy_ff * vx，抵消蟹行（vy_ff = tan(蟹行角)）
     """
 
     def __init__(self, mode="current", dt=0.1, wz_stop=0.15, min_wz=0.32, min_vx=0.3, vx_stop=0.05, turn_min_vx=0.0,
-                 walk_min_wz=0.15, walk_wz_stop=0.03, smooth_s=1.0, vy_gain=0.8, vy_max=0.2, vy_ff=0.0):
+                 walk_min_wz=0.15, walk_wz_stop=0.03, smooth_s=1.0, vy_gain=0.8, vy_max=0.2, vy_ff=0.0,
+                 max_reverse_vx=0.0, min_reverse_vx=0.25):
         self.mode, self.dt = mode, dt
+        self.max_reverse_vx, self.min_reverse_vx = max_reverse_vx, min_reverse_vx
         self.wz_stop, self.min_wz, self.min_vx, self.vx_stop, self.turn_min_vx = wz_stop, min_wz, min_vx, vx_stop, turn_min_vx
         self.walk_min_wz, self.walk_wz_stop = walk_min_wz, walk_wz_stop
         self.ma = MovingAverage(smooth_s, dt) if smooth_s > 0 else None
@@ -108,8 +113,27 @@ class Bridge:
         vx = self.lift(vx, self.vx_stop, self.min_vx)
         return vx, (wz if vx > 0 else 0.0)
 
+    def deployed(self, vx, wz):
+        if vx < 0.0:   # cmdvel_to_sport.cpp：max_reverse_vx<=0 时负 vx 钳 0；放开时只允许直线后退（带转向按原地转，vx 置 0）
+            if self.max_reverse_vx <= 0.0 or abs(wz) >= self.wz_stop:
+                vx = 0.0
+            else:
+                vx = max(vx, -self.max_reverse_vx)
+        if abs(wz) >= self.wz_stop:
+            minimum = self.walk_min_wz if vx >= self.vx_stop else self.min_wz
+            wz = math.copysign(max(abs(wz), minimum), wz)
+            vx = min(vx, -self.turn_min_vx) if vx <= -self.vx_stop else max(vx, self.turn_min_vx)
+            return vx, wz
+        vx = self.lift(vx, self.vx_stop, self.min_reverse_vx if vx < 0 else self.min_vx)
+        if vx <= 0.0:
+            wz = 0.0
+        return vx, wz
+
     def _call(self, vx, wz, cte=None):
         """返回发给 G1 的 (vx, vy, wz)。cte = 当前横向偏差（左正，m），只有 vy 模式用。"""
+        if self.mode == "deployed":
+            vx2, wz2 = self.deployed(vx, wz)
+            return vx2, 0.0, wz2
         walking = vx >= self.vx_stop
         if self.mode in ("walkmin", "pulse") and walking:
             ws = self.ma(wz) if self.ma else wz

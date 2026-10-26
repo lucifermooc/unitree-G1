@@ -1,0 +1,59 @@
+# 两张 costmap 加一层"激光"障碍（run_shim_test.py 用）：吃 /sim/scan（base_link 系 LaserScan，360°，
+# 按"定位位姿"对地图墙 + 场景障碍做射线求交）。标记 2.5 m（= 实机 STVL 标记距离）、射线清除 3.0 m，
+# 所以动态障碍走开后格子会被清掉（obstacle_layer_sim.yaml 只标不清，只适合静止障碍）。
+# 不做足迹自清（实机 D435 层也不自清）：障碍贴到机器人身上时 costmap 里就是贴着的。
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      inflation_layer:
+        cost_scaling_factor: 8.0
+        inflation_radius: 0.85
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: true
+        footprint_clearing_enabled: false
+        track_unknown_space: true
+        observation_sources: scan
+        scan:
+          topic: /sim/scan
+          data_type: LaserScan
+          marking: true
+          clearing: true
+          obstacle_max_range: 2.5
+          obstacle_min_range: 0.0
+          raytrace_max_range: 3.0
+          raytrace_min_range: 0.0
+          min_obstacle_height: -1.0
+          max_obstacle_height: 2.0
+          observation_persistence: 0.0
+          expected_update_rate: 0.0
+          inf_is_valid: true         # 没打到东西的光束发 inf：nav2 按 range_max 处理并用来清除（发 range_max 会被丢掉，清不掉正前方）
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      inflation_layer:
+        cost_scaling_factor: 6.0
+        inflation_radius: 0.85
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: true
+        footprint_clearing_enabled: false
+        track_unknown_space: true
+        observation_sources: scan
+        scan:
+          topic: /sim/scan
+          data_type: LaserScan
+          marking: true
+          clearing: true
+          obstacle_max_range: 2.5
+          obstacle_min_range: 0.0
+          raytrace_max_range: 3.0
+          raytrace_min_range: 0.0
+          min_obstacle_height: -1.0
+          max_obstacle_height: 2.0
+          observation_persistence: 0.0
+          expected_update_rate: 0.0
+          inf_is_valid: true         # 没打到东西的光束发 inf：nav2 按 range_max 处理并用来清除（发 range_max 会被丢掉，清不掉正前方）

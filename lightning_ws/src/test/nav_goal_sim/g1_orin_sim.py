@@ -4,6 +4,9 @@
 TF：map->odom 恒等（静态），odom->base_link = 叠加了步态晃动的"定位位姿"（RPP、costmap 看到的就是它）。
 另发 /sim/truth（骨盆真实位姿）、/sim/pub_pose（发布位姿）、/sim/sent（桥发给 G1 的 vx/vy/wz）供 run_track_test.py 统计。
 参数：bridge.* 传给 Bridge，model.* 传给 G1（如 -p bridge.mode:=pulse -p model.yaw_comp_deg:=9.5）。
+odom.spin_step_speed / odom.spin_step_sigma（默认 0 = 关）：原地转时 G1 在原地踏步，自己的速度估计（/odom）不是 0——
+2026-10-26 veljump_1026_1612 实测原地转时 /odom 水平速度 p10 0.04、p50 0.11、p90 0.20。打开后原地转时在 /odom 的 linear.y
+上加一个 OU 过程（均值 spin_step_speed、标准差 spin_step_sigma、τ 0.3 s，取绝对值），只影响吃 /odom 速度的节点（crab_comp_sim）。
 """
 import math
 
@@ -18,7 +21,8 @@ from tf2_ros import StaticTransformBroadcaster, TransformBroadcaster
 from g1_orin_model import G1, Bridge
 
 BRIDGE_DEFAULTS = dict(mode="current", wz_stop=0.15, min_wz=0.32, min_vx=0.3, vx_stop=0.05, turn_min_vx=0.0,
-                       walk_min_wz=0.15, walk_wz_stop=0.03, smooth_s=0.0, vy_gain=0.8, vy_max=0.2, vy_ff=0.0)
+                       walk_min_wz=0.15, walk_wz_stop=0.03, smooth_s=0.0, vy_gain=0.8, vy_max=0.2, vy_ff=0.0,
+                       max_reverse_vx=0.0, min_reverse_vx=0.25)
 MODEL_DEFAULTS = dict(walk_resp="measured", walk_yaw_bias=0.014, latency=0.35, tau_v=0.3, tau_w=0.2, dist_sigma=0.10, dist_tau=5.0,
                       sway_y=0.06, sway_yaw_deg=2.5, sway_f=1.0, spin_drift=True, vy_dead=0.10, crab_deg=9.5,
                       yaw_comp_deg=0.0, seed=0)
@@ -37,6 +41,10 @@ class G1OrinSim(Node):
         bk = {k: self.declare_parameter(f"bridge.{k}", v).value for k, v in BRIDGE_DEFAULTS.items()}
         mk = {k: self.declare_parameter(f"model.{k}", v).value for k, v in MODEL_DEFAULTS.items()}
         self.bridge = Bridge(dt=0.1, **bk)
+        self.step_mu = self.declare_parameter("odom.spin_step_speed", 0.0).value
+        self.step_sigma = self.declare_parameter("odom.spin_step_sigma", 0.0).value
+        self.step_rng = np.random.default_rng(int(mk.get("seed", 0)) + 1000)
+        self.step_v = self.step_mu
         self.g1 = G1(x=x, y=y, yaw=yaw, **mk)
         self.get_logger().info(f"bridge {bk}")
         self.get_logger().info(f"model {mk}")
@@ -113,6 +121,10 @@ class G1OrinSim(Node):
         o.header.frame_id, o.child_frame_id = "odom", "base_link"
         o.pose.pose = self.pose_msg(stamp, px, py, pyaw).pose
         o.twist.twist.linear.x, o.twist.twist.angular.z = self.g1.v, self.g1.w
+        if self.step_mu > 0.0 and abs(self.g1.v) < 0.05 and abs(self.g1.w) > 0.1:   # 原地转踏步
+            a = self.dt / 0.3
+            self.step_v += (self.step_mu - self.step_v) * a + self.step_sigma * math.sqrt(2 * a) * self.step_rng.standard_normal()
+            o.twist.twist.linear.y = abs(self.step_v)
         self.odom_pub.publish(o)
         self.truth_pub.publish(self.pose_msg(stamp, tx, ty, tyaw))
         self.pubpose_pub.publish(self.pose_msg(stamp, px, py, pyaw))
