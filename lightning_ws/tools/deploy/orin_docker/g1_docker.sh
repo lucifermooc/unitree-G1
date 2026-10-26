@@ -82,10 +82,14 @@ case "${1:-}" in
     # launch_manager 拉起的定位 / 导航子 launch 没被收掉时会挂到容器下继续跑。2026-10-24 实测 10:33 停服务后
     # 09:18 的整套导航栈（含 cmdvel_to_sport）一直活着，与新栈同名并存，负载 20 → 35。
     # stop_ros_processes.py 是纯 Python，主机（--pid=host 共享 /proc）上直接跑；只清本服务，不误杀另一个服务。
+    # 停 robot 时除了 semantic_map 本身，还要放过 semantic 服务的外壳：docker exec 客户端（命令行 "... g1 semantic
+    # .../g1_autostart.sh"，是该 unit 的主进程）和 exec 成 ros2 launch 之前的 "g1_autostart.sh semantic"。
+    # 两者命令行含 install/ 却不含 semantic_map，2026-10-26 robot_hal 重启 g1-robot 时把前者 SIGINT 掉，
+    # systemd 判主进程退出，接着跑 semantic 的 ExecStop，语义地图跟着停了。
     if [ -f "$STOP_ROS" ]; then
       case "$what" in
         semantic) filter=(--only semantic_map) ;;
-        *)        filter=(--exclude semantic_map) ;;
+        *)        filter=(--exclude semantic_map --exclude 'g1 semantic ' --exclude 'g1_autostart.sh semantic') ;;
       esac
       python3 "$STOP_ROS" --workspace "$G1_WS" "${filter[@]}" >&2 || echo "WARN residual cleanup failed" >&2
     else
