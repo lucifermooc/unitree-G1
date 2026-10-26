@@ -531,9 +531,11 @@ async function taskControl(cmd) {
 }
 
 // ---------------- 避障半径（接口文档 3.4） ----------------
-// 两张 costmap 的 robot_radius 和 inflation_layer.inflation_radius 都支持运行时改（Nav2 动态参数），用节点自带的
-// get_parameters / set_parameters 服务。Nav2 重启后恢复 nav2_params.yaml 的值，所以导航页打开时每 5 秒读一次。
-const RADIUS = { min: 0.40, max: 0.55, pad: 0.20,  // 膨胀半径 = 半径 + 0.20（与 nav2_params.yaml 的约定一致）
+// 两张 costmap 的 robot_radius 支持运行时改（Nav2 动态参数），用节点自带的 get_parameters / set_parameters 服务。
+// Nav2 重启后恢复 nav2_params.yaml 的值，所以导航页打开时每 5 秒读一次。
+// 膨胀半径只读不改（2026-10-25）：原来按"半径 + 0.20"一起改，设 0.40 时膨胀变 0.60，梯度带只剩 0.2 m，
+// 离障碍 0.6 m 外代价全为 0，规划器不再把路径推向通道中线，路径贴墙、走着走着就 collision ahead。膨胀半径以配置文件为准。
+const RADIUS = { min: 0.40, max: 0.55, minBand: 0.10,  // 膨胀半径至少比半径大 0.10，否则不让改
   nodes: ["/local_costmap/local_costmap", "/global_costmap/global_costmap"],
   names: ["robot_radius", "inflation_layer.inflation_radius"] };
 const PARAM_DOUBLE = 3;  // rcl_interfaces/msg/ParameterType
@@ -590,11 +592,17 @@ async function applyRadius() {
   const r = Number($("radiusInput").value);
   const err = radiusError(r);
   if (err) throw new Error(`避障半径${err}`);
-  const v = round(r, 2), infl = round(v + RADIUS.pad, 2);
+  const v = round(r, 2);
+  await loadRadius(false);
   for (const node of RADIUS.nodes) {
-    // 先改膨胀再改半径：在允许范围内，新膨胀半径总不小于新旧两个半径，中途不会出现"膨胀 < 半径"
+    const cur = S.radius && S.radius[node];
+    if (!cur || cur.inflation === null) throw new Error(`${node} 读不到当前膨胀半径，没有修改`);
+    if (cur.inflation < v + RADIUS.minBand - 1e-9) {
+      throw new Error(`${node} 膨胀半径 ${cur.inflation.toFixed(2)} 米，半径最大只能设到 ${(cur.inflation - RADIUS.minBand).toFixed(2)} 米`);
+    }
+  }
+  for (const node of RADIUS.nodes) {
     const res = await call([`${node}/set_parameters`, "rcl_interfaces/srv/SetParameters"], { parameters: [
-      { name: "inflation_layer.inflation_radius", value: { type: PARAM_DOUBLE, double_value: infl } },
       { name: "robot_radius", value: { type: PARAM_DOUBLE, double_value: v } },
     ] }, 10000);
     const bad = res.results.find((x) => !x.successful);
@@ -607,7 +615,9 @@ async function applyRadius() {
 // ---------------- 按条件订阅 ----------------
 // want() 为真时订阅，为假时退订并调 off() 清掉数据。模式、连接、勾选框、标签页变化时调 updateSubs()。
 // local costmap 是 map 系的滚动窗口（6×6 m、0.05 m），值已被 nav2 换成 0~100：100 致命、99 内切带、1~98 膨胀、-1 未知。
-// 路径：/plan 是 SmacPlanner2D 的全局路径（BT 1 Hz 重规划，没有平滑器，控制器直接跟它；剩余距离也用它算，所以导航时一直订阅）；
+// 路径：/plan 是 SmacPlanner2D 的全局路径（按 global costmap 规划，含 Smac 内置平滑；只在重规划时才发新的——2026-10-26 前 BT 只在
+// 路径失效时重规划，之后是每 2 s 或失效时——所以 /plan 可能是机器人还在后面时规划的，起点落在身后；控制器直接跟它，剩余距离也用它算，导航时一直订阅）；
+// 注意画在它下面的是 local costmap（实时），不是规划器当时看到的 global costmap，两者可以对不上；
 // /received_global_plan 是 RPP 实际在跟的那一段（裁到 costmap 范围内）；/lookahead_collision_arc 是 RPP 按当前速度预测的未来轨迹。
 const inNav = () => S.robotStatus.split("+")[1] === "patrol";
 const inLoc = () => S.robotStatus.split("+")[0] === "localization";
