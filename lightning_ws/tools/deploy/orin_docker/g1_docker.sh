@@ -11,13 +11,15 @@
 #   g1_docker.sh shell                    进容器交互 shell（已 source jazzy + install + dds_env.sh，不读主机 ~/.bashrc）
 #   g1_docker.sh run <命令...>            在容器里执行一条命令（同上环境），如 g1_docker.sh run ros2 topic list
 #   g1_docker.sh service robot|semantic   systemd ExecStart：前台执行 g1_autostart.sh，进程号写 /tmp/g1-<名>.pid
-#   g1_docker.sh service-stop robot|semantic  systemd ExecStop：给该进程发 SIGINT（= Ctrl-C），最多等 30 s
+#   g1_docker.sh service-stop robot|semantic  systemd ExecStop：给该进程发 SIGINT（= Ctrl-C），最多等 30 s，
+#                                         再清掉本服务残留的 ROS 进程（见 service-stop 分支的注释）
 set -eo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IMAGE="${G1_IMAGE:-g1-jazzy:latest}"
 NAME="${G1_CONTAINER:-g1}"
 G1_WS="${G1_WS:-/opt/G1/lighting_ws}"
 AUTOSTART="$G1_WS/install/robot_bringup/share/robot_bringup/script/g1_autostart.sh"
+STOP_ROS="$G1_WS/install/robot_bringup/share/robot_bringup/script/stop_ros_processes.py"
 
 up() {
   local state; state="$(docker inspect -f '{{.State.Status}}' "$NAME" 2>/dev/null || true)"
@@ -76,6 +78,19 @@ case "${1:-}" in
       kill -0 "$pid" 2>/dev/null && { echo "pid $pid still alive after 30 s, SIGKILL" >&2; kill -KILL "$pid" || true; }
     fi
     rm -f "$pidf"
+    # 清残留：ROS 进程在容器的 cgroup 里，不在本 unit 的 cgroup 里，systemd 的 KillMode=control-group 够不着；
+    # launch_manager 拉起的定位 / 导航子 launch 没被收掉时会挂到容器下继续跑。2026-10-24 实测 10:33 停服务后
+    # 09:18 的整套导航栈（含 cmdvel_to_sport）一直活着，与新栈同名并存，负载 20 → 35。
+    # stop_ros_processes.py 是纯 Python，主机（--pid=host 共享 /proc）上直接跑；只清本服务，不误杀另一个服务。
+    if [ -f "$STOP_ROS" ]; then
+      case "$what" in
+        semantic) filter=(--only semantic_map) ;;
+        *)        filter=(--exclude semantic_map) ;;
+      esac
+      python3 "$STOP_ROS" --workspace "$G1_WS" "${filter[@]}" >&2 || echo "WARN residual cleanup failed" >&2
+    else
+      echo "WARN $STOP_ROS missing, residual ROS processes not cleaned" >&2
+    fi
     ;;
   *)
     sed -n '2,16p' "$0"; exit 2

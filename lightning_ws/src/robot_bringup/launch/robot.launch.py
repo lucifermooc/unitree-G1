@@ -59,7 +59,8 @@ def _status_manager(context):
             # Nav2 的数值参数全在 aid_navigation2/param/nav2_params.yaml 里，只透传开关。
             'navigation_launch_args': _launch_args(
                 context, 'use_realsense_obstacles', 'use_d435_mark_filter',
-                'use_collision_monitor', 'use_keepout', start_bridge='true'),
+                'use_collision_monitor', 'use_keepout', 'bridge_params_overlay', 'nav_params_overlay',
+                start_bridge='true'),
             'mapping_launch_args': _launch_args(
                 context, 'map_save_root', 'with_ui', 'with_2dui', 'start_rviz',
                 'pub_registered_scan', 'floor_height', 'min_obstacle_height',
@@ -93,6 +94,7 @@ def generate_launch_description():
             'realsense_initial_reset': LaunchConfiguration('realsense_initial_reset'),
             'realsense_enable_color': LaunchConfiguration('realsense_enable_color'),
             'realsense_depth_filters': LaunchConfiguration('realsense_depth_filters'),
+            'realsense_depth_profile': LaunchConfiguration('realsense_depth_profile'),
         }.items(),
     )
 
@@ -152,6 +154,8 @@ def generate_launch_description():
             'use_d435_mark_filter': LaunchConfiguration('use_d435_mark_filter'),
             'use_collision_monitor': LaunchConfiguration('use_collision_monitor'),
             'use_keepout': LaunchConfiguration('use_keepout'),
+            'bridge_params_overlay': LaunchConfiguration('bridge_params_overlay'),
+            'nav_params_overlay': LaunchConfiguration('nav_params_overlay'),
             # 运动桥只由 g1_navigation.launch.py 创建一次。
             'start_bridge': 'true',
         }.items(),
@@ -208,6 +212,15 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'realsense_enable_color', default_value='true', choices=['true', 'false'],
             description='点云不再需要 color；纯避障场景可设 false 省带宽'),
+        DeclareLaunchArgument(
+            'realsense_depth_profile', default_value='0,0,0',
+            description="D435 深度流，如 848x480x15；'0,0,0' = 驱动默认（USB3 下 848x480x30）"),
+        DeclareLaunchArgument(
+            'bridge_params_overlay', default_value='',
+            description='叠加在 g1_nav_bridge/config/nav_bridge.yaml 之后的本机参数文件（空 = 不叠加）'),
+        DeclareLaunchArgument(
+            'nav_params_overlay', default_value='',
+            description='合并到 aid_navigation2/param/nav2_params.yaml 之上的本机参数文件（空 = 不合并）'),
         DeclareLaunchArgument('start_rosbridge', default_value='true'),
         DeclareLaunchArgument('start_backend', default_value='true'),
         DeclareLaunchArgument('with_ui', default_value='false'),

@@ -39,6 +39,8 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'realsense_depth_filters', default_value='false', choices=['true', 'false'],
             description='temporal 深度滤波（spatial 已默认开）；temporal 会用历史深度制造残影，默认关'),
+        # 深度流分辨率与帧率，如 848x480x15；'0,0,0' = rs_launch 默认（按 USB 口自选，USB2 时会降档）。
+        DeclareLaunchArgument('realsense_depth_profile', default_value='0,0,0'),
         DeclareLaunchArgument('realsense_config', default_value=os.path.join(
             get_package_share_directory('robot_bringup'), 'param',
             'realsense_g1.yaml')),
@@ -68,6 +70,7 @@ def generate_launch_description():
                 # 因此点云不再依赖 color 流。这里保留 color 开关供调试使用，
                 # 只做避障时可以 realsense_enable_color:=false 省一半 USB 带宽。
                 'enable_color': LaunchConfiguration('realsense_enable_color'),
+                'depth_module.depth_profile': LaunchConfiguration('realsense_depth_profile'),
                 'pointcloud.enable': 'true',
                 'pointcloud.allow_no_texture_points': 'true',
                 # 848x480 全分辨率点云约 34 万点/帧（~7MB，9Hz），best-effort 订阅大量丢帧、

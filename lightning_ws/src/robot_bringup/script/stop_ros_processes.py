@@ -40,7 +40,9 @@ def alive(pid):
         return False
 
 
-def find_targets(workspace):
+def find_targets(workspace, only=(), exclude=()):
+    """only / exclude：按命令行子串过滤（only 为空表示不限）。Orin 容器版 g1_docker.sh service-stop
+    停单个服务时用它只清本服务的残留，不误杀另一个服务（例如停 robot 时 --exclude semantic_map）。"""
     excluded = ancestors()
     uid = os.getuid()
     patterns = (
@@ -62,8 +64,13 @@ def find_targets(workspace):
         except (FileNotFoundError, PermissionError, ProcessLookupError):
             continue
         command = cmdline(pid)
-        if command and any(pattern in command for pattern in patterns):
-            targets[pid] = command
+        if not command or not any(pattern in command for pattern in patterns):
+            continue
+        if only and not any(pattern in command for pattern in only):
+            continue
+        if any(pattern in command for pattern in exclude):
+            continue
+        targets[pid] = command
     return targets
 
 
@@ -88,14 +95,21 @@ def wait_for_exit(targets, timeout):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--workspace', default='/opt/G1/lighting_ws')
+    parser.add_argument('--only', action='append', default=[], metavar='SUBSTR',
+                        help='只处理命令行含该子串的进程（可重复）')
+    parser.add_argument('--exclude', action='append', default=[], metavar='SUBSTR',
+                        help='跳过命令行含该子串的进程（可重复）')
+    parser.add_argument('--dry-run', action='store_true', help='只列出，不发信号')
     args = parser.parse_args()
 
-    targets = find_targets(args.workspace)
+    targets = find_targets(args.workspace, args.only, args.exclude)
     if not targets:
         print('No matching ROS processes found.')
         return
     for pid, command in sorted(targets.items()):
-        print(f'Stopping PID {pid}: {command}')
+        print(f'{"Would stop" if args.dry_run else "Stopping"} PID {pid}: {command}')
+    if args.dry_run:
+        return
 
     send(targets, signal.SIGINT)
     remaining = wait_for_exit(targets, 3.0)

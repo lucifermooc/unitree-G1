@@ -14,7 +14,7 @@ G1 自带的 Orin NX（PC2，`192.168.123.164`）是 JetPack 5.1.1 / Ubuntu 20.0
 |---|---|---|
 | `Dockerfile`、`g1_env.sh` | `/opt/G1/docker/` | 镜像：ROS 包取 Thor 上手动安装的那批 `ros-jazzy-*`（不含 rviz / rqt 等界面包），开发库、语义地图 Python 依赖与 Thor 同版本（torch 为 CPU 版） |
 | `g1_docker.sh` | `/opt/G1/docker/` | `build-image` / `up` / `recreate` / `shell` / `run <命令>` / `service`、`service-stop robot\|semantic` |
-| `g1-robot.service`、`g1-semantic-map.service` | `/etc/systemd/system/` | 容器版 unit：ExecStart 为 `g1_docker.sh service ...`（docker exec）；docker exec 不转发信号，所以 ExecStop 按 `/tmp/g1-<名>.pid` 发 SIGINT |
+| `g1-robot.service`、`g1-semantic-map.service` | `/etc/systemd/system/` | 容器版 unit：ExecStart 为 `g1_docker.sh service ...`（docker exec）；docker exec 不转发信号，所以 ExecStop 按 `/tmp/g1-<名>.pid` 发 SIGINT，之后再清本服务残留的 ROS 进程（见下） |
 | `container_setup.sh` | `/opt/G1/docker/` | 新建容器时由 `g1_docker.sh` 自动执行（root）：装 Pangolin 0.9.3（lightning thirdparty 里的 zip，lightning 编译硬依赖） |
 | `install_orin.sh` | — | 安装上面这些、sudoers、DDS 缓冲、Qdrant 容器（`qdrant/qdrant:v1.19.1`，restart always） |
 
@@ -24,6 +24,13 @@ G1 自带的 Orin NX（PC2，`192.168.123.164`）是 JetPack 5.1.1 / Ubuntu 20.0
 - `/opt/G1/g1_autostart.local.env`：D435 序列号、`livox_config:=`，语义地图用 `use_fp16:=false`。
 
 **不要在 Orin 上执行 `g1_service.sh install`**：它会装回主机版 unit，而主机上没有 jazzy。其余子命令（start/stop/restart/status/log）照常用。
+
+**停服务后的残留进程**：ROS 进程在容器的 cgroup 里，不在 unit 的 cgroup 里，systemd 停服务时（`KillMode=control-group`）清不到它们。
+launch_manager 拉起的定位 / 导航子 launch 若没被收掉，就会挂到容器下继续跑，下次启动后与新栈同名并存
+（2026-10-24：10:33 `systemctl` 停服务后，09:18 的整套导航栈连同 `cmdvel_to_sport` 一直活着，负载 20 → 35）。
+所以 `g1_docker.sh service-stop` 在 SIGINT 之后会调 `stop_ros_processes.py` 清本服务的残留（robot：`--exclude semantic_map`；
+semantic：`--only semantic_map`）。`g1_service.sh restart/stop` 本身也会清理（纯 Python，主机上能跑）。
+查有没有残留：`python3 /opt/G1/lighting_ws/install/robot_bringup/share/robot_bringup/script/stop_ros_processes.py --dry-run`。
 
 ## 首次部署
 

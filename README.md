@@ -94,3 +94,12 @@ ros2 launch g1_sim sim.launch.py           # 然后浏览器打开 http://localh
 仍未验证：`/initialpose` 重定位、导航中有人或障碍物挡路时 RPP 的表现、新导航方案的仿真（`src/test/nav_goal_sim` 没有按 v1.0.0 重跑）。
 
 接口文档核对出的问题（旧文档与代码不一致处）列在接口文档末尾的《附录 A 修订记录》。
+
+
+bash /opt/G1/docker/g1_docker.sh shell
+# 进入容器后：后退 vx=-0.1，持续 1 s，到时间本体自己停
+ros2 topic pub --once /api/sport/request unitree_api/msg/Request \
+  "{header: {identity: {id: 1, api_id: 7105}}, parameter: '{\"velocity\": [-0.1, 0.0, 0.0], \"duration\": 1.0}'}"
+# 急停（零速）
+ros2 topic pub --once /api/sport/request unitree_api/msg/Request \
+  "{header: {identity: {id: 2, api_id: 7105}}, parameter: '{\"velocity\": [0.0, 0.0, 0.0], \"duration\": 0.5}'}"
