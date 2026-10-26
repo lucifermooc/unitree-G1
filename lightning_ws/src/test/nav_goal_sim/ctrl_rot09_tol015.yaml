@@ -1,0 +1,7 @@
+# 方案 B + 到点容差 0.3 -> 0.15
+controller_server:
+  ros__parameters:
+    goal_checker:
+      xy_goal_tolerance: 0.15
+    FollowPath:
+      rotate_to_heading_angular_vel: 0.9

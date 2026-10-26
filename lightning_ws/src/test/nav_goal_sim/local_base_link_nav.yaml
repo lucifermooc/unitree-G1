@@ -1,0 +1,5 @@
+# 与 tools/deploy/orin_docker/nav2_params.local.yaml 一致：只有 local costmap（controller / RPP / goal_checker 跟着）用 base_link_nav
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      robot_base_frame: base_link_nav

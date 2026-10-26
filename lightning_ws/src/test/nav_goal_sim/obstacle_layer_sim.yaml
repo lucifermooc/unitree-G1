@@ -1,0 +1,48 @@
+# 两张 costmap 加一层"传感器"障碍（run_replan_test.py 用）：吃 /sim/obstacles（map 系 PointCloud2，场景里全部障碍点），
+# 只标离 base_link 2.5 m 内的点（= 实机 STVL livox_mark / realsense_mark_tall 的标记距离），只标不清。
+# 所以规划那一刻远处的障碍不在 global costmap 里，走近了才出现——复现"规划后才看到的障碍"。
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: true
+        footprint_clearing_enabled: false
+        track_unknown_space: true        # 未看到的格保持未知，不拿 0 覆盖静态层
+        observation_sources: sim
+        sim:
+          topic: /sim/obstacles
+          data_type: PointCloud2
+          sensor_frame: base_link        # 量程按机器人位置算
+          marking: true
+          clearing: false
+          obstacle_max_range: 2.5
+          obstacle_min_range: 0.0
+          min_obstacle_height: 0.0
+          max_obstacle_height: 2.0
+          observation_persistence: 0.0
+          expected_update_rate: 0.0
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: true
+        footprint_clearing_enabled: false
+        track_unknown_space: true        # 未看到的格保持未知，不拿 0 覆盖静态层
+        observation_sources: sim
+        sim:
+          topic: /sim/obstacles
+          data_type: PointCloud2
+          sensor_frame: base_link        # 量程按机器人位置算
+          marking: true
+          clearing: false
+          obstacle_max_range: 2.5
+          obstacle_min_range: 0.0
+          min_obstacle_height: 0.0
+          max_obstacle_height: 2.0
+          observation_persistence: 0.0
+          expected_update_rate: 0.0
