@@ -76,6 +76,7 @@ class LidarLoc {
 
         /// 一致性守护（见 loc_guard.h），配置在 yaml 的 loc_guard 段
         LocGuard::Options guard_;
+        JumpRelock::Options relock_;  // 跳变检查锁死解除（loc_guard 段 relock_*），见 loc_guard.h
         /// 外部设置位姿（/initialpose）初始化时，在给定航向左右各搜索的角度与步长（度）；0 = 不搜，直接匹配
         double init_yaw_search_deg_ = 15.0;
         double init_yaw_search_step_deg_ = 3.0;
@@ -334,6 +335,7 @@ class LidarLoc {
     std::mutex leg_odom_mutex_;
     std::deque<TimedPose> leg_odom_queue_;
     LocGuard guard_;
+    JumpRelock relock_;
 
     /// 功能点初始化的记录
     std::vector<SE3> fp_init_fail_pose_vec_;

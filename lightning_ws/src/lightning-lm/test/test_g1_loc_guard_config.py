@@ -60,6 +60,20 @@ class LocGuardConfigTests(unittest.TestCase):
         self.assertLessEqual(self.guard['max_ndt_jump_deg'], 5.0)
         self.assertGreater(self.guard['max_ndt_jump_deg'], 0.5)
 
+    def test_jump_relock(self):
+        # 2026-10-24：跳变检查锁死解除。一致性门限要比锁死时的偏差（0.4~0.6 m）小得多，否则区分不了 NDT 两个局部最优；
+        # 必须要求净位移（原地静止 / 原地转时起点开阔区的歧义不能解除）；修正上限不能比门限还小
+        g = self.guard
+        self.assertGreaterEqual(g['relock_frames'], 3)
+        self.assertLessEqual(g['relock_consistency_m'], 0.2)
+        self.assertLessEqual(g['relock_consistency_deg'], g['max_ndt_jump_deg'])
+        self.assertGreaterEqual(g['relock_min_travel_m'], 0.3)
+        self.assertGreater(g['relock_max_m'], g['max_ndt_jump_m'])
+        self.assertLessEqual(g['relock_max_m'], 1.5)
+        self.assertGreater(g['relock_score_ratio'], 0.8)
+        self.assertLessEqual(g['relock_score_ratio'], 1.0)
+        self.assertGreater(g['relock_hint_frames'], g['relock_frames'])
+
     def test_loc_input_keys_are_read(self):
         # 2026-09-30 投影关键帧 A/B 开关：默认保持上游行为（带历史关键帧投影）
         loc_input = self.config['loc_input']

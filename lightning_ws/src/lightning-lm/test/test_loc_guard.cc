@@ -307,3 +307,162 @@ TEST(LocGuard, OdomSpikesDuringTurnsDoNotFlap) {
     EXPECT_EQ(transitions, 1);
     EXPECT_LT(PosErr(sim.out, truth), kOneFrame);
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// JumpRelock（2026-10-24）：单帧跳变检查锁死后的解除。闭环模拟 lidar_loc 的跳变检查 + 解除，NDT 给真值（或错配）。
+namespace {
+
+using lightning::loc::JumpRelock;
+
+struct RelockSim {
+    JumpRelock relock;
+    SE3 out, last_lo;
+    bool first = true;
+    int relock_frame = -1;
+    int frame = 0;
+    double score = 2.5;
+
+    explicit RelockSim(JumpRelock::Options o = JumpRelock::Options()) : relock(o) {}
+
+    /// out0：锁死时的输出（相对真值的偏差就是锁死量）；lo：LIO 位姿；ndt_fn(guess) 给 NDT 结果
+    template <typename F>
+    void Step(const SE3& lo, const SE3& out0, F&& ndt_fn) {
+        if (first) {
+            out = out0;
+            last_lo = lo;
+            first = false;
+        }
+        const SE3 guess = out * (last_lo.inverse() * lo);
+        const SE3 ndt = ndt_fn(guess);
+        const SE3 res = guess.inverse() * ndt;
+        const double jm = res.translation().head<2>().norm();
+        const lightning::Mat3d R = res.rotationMatrix();
+        const double jd = std::fabs(std::atan2(R(1, 0), R(0, 0))) * 180.0 / M_PI;
+        const bool rejected = jm > 0.2 || jd > 3.0;
+        const auto action = relock.Update(rejected, guess, ndt, lo, score);
+        if (action == JumpRelock::Action::kAccept) {
+            out = ndt;
+            if (relock_frame < 0) relock_frame = frame;
+        } else if (action == JumpRelock::Action::kRevert) {
+            out = relock.RevertCorrection() * guess;
+        } else {
+            out = rejected ? guess : guess * SE3::exp(res.log() * kBalance);
+        }
+        last_lo = lo;
+        ++frame;
+    }
+};
+
+}  // namespace
+
+TEST(JumpRelock, LockedOffsetIsReleasedWhileWalking) {
+    // 10-24 15:00（lmw）：输出整体偏 0.5 m，NDT 给真值、分值正常，机器人在走
+    RelockSim sim;
+    std::mt19937 rng(7);
+    std::normal_distribution<double> n(0, 0.02);
+    SE3 truth;
+    for (int i = 0; i < 40; ++i) {
+        truth = Pose(i * 0.2);
+        sim.Step(truth, truth * Pose(0, 0.5), [&](const SE3&) { return truth * Pose(n(rng), n(rng)); });
+    }
+    ASSERT_GE(sim.relock_frame, 0);
+    EXPECT_LE(sim.relock_frame, 8);  // 5 帧一致 + 净位移 >= 0.5 m
+    EXPECT_LT(PosErr(sim.out, truth), 0.1);
+    EXPECT_EQ(sim.relock.Relocks(), 1);
+    EXPECT_EQ(sim.relock.Reverts(), 0);  // 采信后 NDT 与新输出一致，验证通过
+    EXPECT_FALSE(sim.relock.NeedReloc());
+}
+
+TEST(JumpRelock, StaticAmbiguityIsNotReleased) {
+    // 起点开阔区静止：NDT 反复落在同一个（可能是错的）位置，换不了视角，不能解除，只提示重定位
+    RelockSim sim;
+    for (int i = 0; i < 100; ++i) {
+        sim.Step(Pose(0), Pose(0, 0.4), [&](const SE3&) { return Pose(0); });
+    }
+    EXPECT_LT(sim.relock_frame, 0);
+    EXPECT_TRUE(sim.relock.NeedReloc());
+    EXPECT_EQ(sim.relock.RunLength(), 100);
+}
+
+TEST(JumpRelock, RotationInPlaceIsNotReleased) {
+    // 原地转（含步态躯干 ±5° 摆动）：转角再大也不解除平移上的歧义
+    RelockSim sim;
+    SE3 lo;
+    for (int i = 0; i < 60; ++i) {
+        lo = Pose(0.01 * std::sin(i), 0, i * 0.1 + 0.08 * std::sin(3.0 * i));
+        sim.Step(lo, lo * Pose(0, 0.4), [&](const SE3&) { return lo; });
+    }
+    EXPECT_LT(sim.relock_frame, 0);
+}
+
+TEST(JumpRelock, CorridorPullIsRevertedAndDisabled) {
+    // 走廊里 NDT 相对当前位姿往回拉 0.55 m（09-29，70% 往回、30% 往前）：连续几帧同向时 5 帧窗口内修正量一致、
+    // 和真锁死分不开，可能被采信一次；但采信后 NDT 继续拉，验证期内又被拒 -> 撤回并停用，输出不能被一路拉走
+    RelockSim sim;
+    CorridorNdt ndt;
+    SE3 truth;
+    for (int i = 0; i < 200; ++i) {
+        truth = Pose(i * 0.25);
+        sim.Step(truth, truth, ndt);
+    }
+    EXPECT_LE(sim.relock.Relocks(), 1);
+    EXPECT_EQ(sim.relock.Relocks(), sim.relock.Reverts());
+    if (sim.relock.Relocks() > 0) {
+        EXPECT_TRUE(sim.relock.Disabled());
+        EXPECT_TRUE(sim.relock.NeedReloc());
+    }
+    EXPECT_LT(PosErr(sim.out, truth), 0.1);
+}
+
+TEST(JumpRelock, PersistentPullAfterRelockIsReverted) {
+    // 构造必然先采信再撤回的情形：NDT 每帧都相对当前预测往 +y 拉 0.5 m（修正量恒定、分值正常、机器人在走）
+    RelockSim sim;
+    SE3 truth;
+    for (int i = 0; i < 40; ++i) {
+        truth = Pose(i * 0.2);
+        sim.Step(truth, truth, [&](const SE3& guess) { return guess * Pose(0, 0.5); });
+    }
+    EXPECT_EQ(sim.relock.Relocks(), 1);
+    EXPECT_EQ(sim.relock.Reverts(), 1);
+    EXPECT_TRUE(sim.relock.Disabled());
+    EXPECT_TRUE(sim.relock.NeedReloc());
+    EXPECT_LT(PosErr(sim.out, truth), 0.1);  // 撤回后回到 LIO 推算的位置
+    sim.relock.Reset();                       // 人工重定位后恢复启用
+    EXPECT_FALSE(sim.relock.Disabled());
+}
+
+TEST(JumpRelock, LowScoreIsNotReleased) {
+    // 被拒帧的分值明显低于这张图的正常水平（< 0.95 × 中位数）：不采信
+    RelockSim sim;
+    for (int i = 0; i < 30; ++i) {  // 先攒一段正常分值 2.5 的历史
+        const SE3 truth = Pose(i * 0.2);
+        sim.Step(truth, truth, [&](const SE3&) { return truth; });
+    }
+    sim.score = 2.0;
+    for (int i = 30; i < 45; ++i) {
+        const SE3 truth = Pose(i * 0.2);
+        sim.Step(truth, truth, [&](const SE3&) { return truth * Pose(0, 0.5); });
+    }
+    EXPECT_LT(sim.relock_frame, 0);
+}
+
+TEST(JumpRelock, TooLargeCorrectionIsLeftToManualReloc) {
+    RelockSim sim;
+    for (int i = 0; i < 40; ++i) {
+        const SE3 truth = Pose(i * 0.2);
+        sim.Step(truth, truth * Pose(0, 2.0), [&](const SE3&) { return truth; });
+    }
+    EXPECT_LT(sim.relock_frame, 0);
+    EXPECT_TRUE(sim.relock.NeedReloc());
+}
+
+TEST(JumpRelock, SmallResidualFrameResetsTheRun) {
+    JumpRelock relock;
+    const SE3 g = Pose(0), n = Pose(0, 0.5);
+    for (int i = 0; i < 4; ++i) relock.Update(true, g, n, Pose(i * 0.3), 2.5);
+    EXPECT_EQ(relock.RunLength(), 4);
+    relock.Update(false, g, Pose(0.05), Pose(1.5), 2.5);  // 正常帧（残差 < 0.1 m）打断连续被拒
+    EXPECT_EQ(relock.RunLength(), 0);
+    relock.Update(false, g, Pose(0.15), Pose(1.8), 2.5);  // 未被拒但残差 0.15 m：不打断（也不计入）
+    EXPECT_EQ(relock.RunLength(), 0);
+}

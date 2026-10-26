@@ -62,6 +62,8 @@ class LocGuard {
         bool frozen_ = false;     // 当前是否冻结修正（NDT_SUSPECT 且 freeze）
         int rollbacks_ = 0;       // 本次运行累计回退次数
         double last_rollback_m_ = 0;
+        int relocks_ = 0;         // 单帧跳变检查锁死后被 JumpRelock 解除的累计次数
+        int jump_reject_run_ = 0; // 当前连续被跳变检查拒绝的帧数
     };
 
     /// 一次激光定位的输入
@@ -120,6 +122,99 @@ class LocGuard {
     int odom_ok_cnt_ = 0;   // 里程计连续一致帧数
     bool rollback_now_ = false;
     SE3 rollback_pose_;
+};
+
+/**
+ * 单帧跳变检查（lidar_loc max_ndt_jump_m/deg）的锁死解除。
+ *
+ * 背景（2026-10-24，Orin 30524）：输出与地图的偏差一旦超过跳变门限（0.2 m），之后 NDT 的每次修正都被当作"跳变"拒绝，
+ * 输出只能跟 LIO，偏差永远拉不回来，守护还报 GOOD（10-23 17:53 偏 0.55 m 锁 25 min；10-24 15:00 偏 0.5 m 锁到结束）。
+ * 门限本身是为挡住走廊里 NDT 的单帧错配，不能简单放宽。这里在"连续被拒"时检查被拒的 NDT 结果是否可信：
+ *   - 连续 frames 帧被拒（中间没有残差 < reset_m 的正常帧）；
+ *   - 这几帧换到地图系的修正量 C = ndt * guess^-1 彼此一致（偏离均值 <= consistency_m / consistency_deg）——
+ *     输出整体偏了一个固定量时 C 恒定，NDT 在两个局部最优间跳时 C 不一致；
+ *   - 期间 LIO 净位移 >= min_travel_m：换了视角仍落在同一修正量上，才不是同一个错误极小值反复出现
+ *     （只看净位移不看转角：G1 步态躯干每步摆 ±5°，原地转也不改变平移上的歧义，起点开阔区就是这样）；
+ *   - 分值都不低于 max(min_score, score_ratio × 最近 score_hist 帧分值中位数)（各张图正常分值差很多：1.5~2.8）；
+ *   - 修正量不超过 max_m / max_deg（更大的交给人工重定位）。
+ * 满足时返回 kAccept，调用方本帧整帧采信 NDT 并重置守护 / PGO。
+ * 采信后验证：之后 verify_frames 帧内又被拒 >= verify_fail 帧，说明 NDT 是"相对当前位姿往一个方向拉"（09-29 走廊那种，
+ * 5 帧窗口内修正量同样一致、和真锁死分不开），返回 kRevert：调用方用 RevertCorrection() 撤回本次修正，之后停用解除，
+ * 直到 Reset()（重新初始化 / 人工重定位）。连续被拒 >= hint_frames 帧或已停用时 NeedReloc() 为 true。
+ * 用 10-21~10-24 共 16 段 glog 离线复算（tools/loc_debug/sim_relock.py）：上面两次锁死分别在 17:56:43、15:01:05 解除，
+ * 起点静止 / 原地转的歧义（10-23 上午、10-24 10:39、12:14、14:12、14:53）都不解除。
+ */
+class JumpRelock {
+   public:
+    struct Options {
+        Options() {}
+        int frames_ = 5;
+        double min_score_ = 1.2;
+        double score_ratio_ = 0.95;
+        int score_hist_ = 50;
+        double consistency_m_ = 0.15;
+        double consistency_deg_ = 2.0;
+        double min_travel_m_ = 0.5;
+        double max_m_ = 1.0;
+        double max_deg_ = 10.0;
+        double reset_m_ = 0.10;  // 未被拒且残差小于该值的帧打断"连续被拒"
+        int hint_frames_ = 15;   // 0 = 不提示
+        int verify_frames_ = 5;  // 采信后验证的帧数
+        int verify_fail_ = 3;    // 验证期内被拒达到该帧数即撤回
+    };
+
+    enum class Action { kNone = 0, kAccept = 1, kRevert = 2 };
+
+    explicit JumpRelock(Options options = Options()) : options_(options) {}
+
+    /**
+     * 每个跟踪帧（快速收敛结束后）调用一次。rejected：本帧是否被跳变检查拒绝；guess / ndt：地图系雷达位姿
+     * （LIO 递推的预测 / NDT 结果）；lo：LIO 位姿；score：NDT 分值。返回 true = 本帧应整帧采信 NDT。
+     */
+    Action Update(bool rejected, const SE3& guess, const SE3& ndt, const SE3& lo, double score);
+
+    /// kRevert 时：把输出左乘它即撤回最近一次采信的修正（地图系）
+    SE3 RevertCorrection() const { return correction_.inverse(); }
+
+    bool NeedReloc() const { return disabled_ || (options_.hint_frames_ > 0 && run_count_ >= options_.hint_frames_); }
+    bool Disabled() const { return disabled_; }
+    int Reverts() const { return reverts_; }
+    int RunLength() const { return run_count_; }
+    int Relocks() const { return relocks_; }
+    const Options& GetOptions() const { return options_; }
+    /// 最近一次采信时的平均修正量（日志用）
+    double LastCorrectionM() const { return last_corr_m_; }
+    double LastCorrectionDeg() const { return last_corr_deg_; }
+    /// 重新初始化 / 人工重定位后调用：清空连续被拒记录、结束验证、恢复启用
+    void Reset() {
+        ResetRun();
+        verify_n_ = -1;
+        disabled_ = false;
+    }
+
+   private:
+    struct Item {
+        double cx_ = 0, cy_ = 0, cyaw_ = 0;  // 地图系修正量（平面）
+        double jump_m_ = 0, jump_deg_ = 0;   // 相对 LIO 预测的残差（与跳变检查同口径）
+        double lo_x_ = 0, lo_y_ = 0;
+        double score_ = 0;
+    };
+    Options options_;
+    std::deque<Item> run_;  // 最近 frames 帧被拒的记录
+    int run_count_ = 0;     // 当前连续被拒帧数
+    std::deque<double> scores_;
+    int relocks_ = 0;
+    int reverts_ = 0;
+    double last_corr_m_ = 0, last_corr_deg_ = 0;
+    SE3 correction_;        // 最近一次采信的地图系修正
+    int verify_n_ = -1;     // >= 0：采信后验证中，已过帧数
+    int verify_fail_n_ = 0;
+    bool disabled_ = false; // 撤回过一次：停用解除直到 Reset()
+
+    void ResetRun() {
+        run_.clear();
+        run_count_ = 0;
+    }
 };
 
 }  // namespace lightning::loc

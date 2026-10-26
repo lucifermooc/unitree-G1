@@ -190,11 +190,11 @@ void LocSystem::PublishLocStatus(const loc::LocalizationResult &res) {
                   "{\"stamp\": %.3f, \"state\": \"%s\", \"frozen\": %s, \"drift_m\": %.3f, \"drift_deg\": %.2f, "
                   "\"odom_online\": %s, \"odom_agree\": %d, \"ndt_residual_m\": %.3f, "
                   "\"ndt_residual_deg\": %.2f, \"score\": %.3f, \"rollbacks\": %d, \"last_rollback_m\": %.3f, "
-                  "\"need_reloc\": %s, \"loc_valid\": %s}",
+                  "\"need_reloc\": %s, \"relocks\": %d, \"jump_reject_run\": %d, \"loc_valid\": %s}",
                   res.timestamp_, loc::LocGuard::StateName(g.state_), g.frozen_ ? "true" : "false", g.drift_m_,
                   g.drift_deg_, odom_online ? "true" : "false", g.odom_agree_, g.residual_m_, g.residual_deg_,
-                  res.confidence_, g.rollbacks_, g.last_rollback_m_, g.need_reloc_ ? "true" : "false",
-                  res.lidar_loc_valid_ ? "true" : "false");
+                  res.confidence_, g.rollbacks_, g.last_rollback_m_, g.need_reloc_ ? "true" : "false", g.relocks_,
+                  g.jump_reject_run_, res.lidar_loc_valid_ ? "true" : "false");
     std_msgs::msg::String msg;
     msg.data = buf;
     loc_status_pub_->publish(msg);

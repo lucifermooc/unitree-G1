@@ -171,6 +171,21 @@ loc_guard:
   # 09-30 离线统计导航段 NDT 原始残差 >0.3 m 占 25~46%。代价：累计误差超过该值后 NDT 拉不回来（等同纯 LIO）。0 = 关闭
   max_ndt_jump_m: 0.2
   max_ndt_jump_deg: 3.0
+  # 跳变检查锁死解除（2026-10-24，Orin 30524）：偏差超过上面的门限后修正全被拒，输出只跟 LIO、再也拉不回来
+  # （10-23 17:53 偏 0.55 m 锁 25 min，10-24 15:00 偏 0.5 m 锁到结束）。连续 relock_frames 帧被拒、地图系修正量彼此
+  # 偏离均值 <= relock_consistency_m/deg、期间 LIO 净位移 >= relock_min_travel_m、分值 >= max(relock_min_score,
+  # relock_score_ratio × 近 50 帧中位数)、修正 <= relock_max_m/deg 时整帧采信 NDT 并重置守护 / PGO。
+  # 只看净位移不看转角：原地转（含步态躯干摆动）不解决起点开阔区的平移歧义。16 段 glog 离线复算见 loc_guard.h。
+  # 连续被拒 relock_hint_frames 帧仍未解除时 /lightning/loc_status 的 need_reloc 置 true（前端显示"需要重定位"）。
+  relock_frames: 5            # 0 = 关闭解除，行为同 2026-10-24 以前
+  relock_min_score: 1.2
+  relock_score_ratio: 0.95    # 各张图正常分值差很多（10-23 图中位 1.49，lmw 2.4~2.8），用相对门限
+  relock_consistency_m: 0.15
+  relock_consistency_deg: 2.0
+  relock_min_travel_m: 0.5
+  relock_max_m: 1.0
+  relock_max_deg: 10.0
+  relock_hint_frames: 15
   init_yaw_search_deg: 15.0 # /initialpose 重定位时在给定航向左右搜索的范围；0 = 不搜
   init_yaw_search_step_deg: 3.0
 # 送给激光定位（NDT）的点云。上游行为：当前帧 + 最多 5 个历史关键帧各取最早 1001 点（按 LIO 相对位姿摆到当前帧）。

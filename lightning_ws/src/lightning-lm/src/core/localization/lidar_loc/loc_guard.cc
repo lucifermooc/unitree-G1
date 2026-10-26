@@ -1,7 +1,9 @@
 #include "core/localization/lidar_loc/loc_guard.h"
 
 #include <glog/logging.h>
+#include <algorithm>
 #include <cmath>
+#include <vector>
 #include <cstdio>
 #include <iomanip>
 
@@ -212,6 +214,106 @@ double LocGuard::Update(const Frame& frame, double proposed_balance) {
     }
 
     return balance;
+}
+
+JumpRelock::Action JumpRelock::Update(bool rejected, const SE3& guess, const SE3& ndt, const SE3& lo, double score) {
+    scores_.push_back(score);
+    while (static_cast<int>(scores_.size()) > std::max(1, options_.score_hist_)) scores_.pop_front();
+
+    auto yaw_deg = [](const SE3& T) {
+        const Mat3d R = T.rotationMatrix();
+        return std::atan2(R(1, 0), R(0, 0)) * 180.0 / M_PI;
+    };
+    auto wrap = [](double a) { return std::remainder(a, 360.0); };
+
+    const SE3 res = guess.inverse() * ndt;
+    const double jump_m = res.translation().head<2>().norm();
+
+    if (verify_n_ >= 0) {  // 采信后验证：NDT 应该和修正后的输出一致
+        ++verify_n_;
+        if (rejected) ++verify_fail_n_;
+        if (verify_fail_n_ >= options_.verify_fail_) {
+            verify_n_ = -1;
+            disabled_ = true;
+            ++reverts_;
+            ResetRun();
+            LOG(WARNING) << "ndt jump relock #" << relocks_ << " reverted: " << verify_fail_n_
+                         << " rejects right after it (NDT keeps pulling, not a stale offset); relock disabled until "
+                            "re-init / manual relocalization";
+            return Action::kRevert;
+        }
+        if (verify_n_ >= options_.verify_frames_) {
+            verify_n_ = -1;
+            LOG(INFO) << "ndt jump relock #" << relocks_ << " verified (" << verify_fail_n_ << " rejects in "
+                      << options_.verify_frames_ << " frames)";
+        }
+    }
+
+    if (!rejected) {
+        if (jump_m < options_.reset_m_) ResetRun();
+        return Action::kNone;
+    }
+
+    const SE3 corr = ndt * guess.inverse();
+    Item it;
+    it.cx_ = corr.translation().x();
+    it.cy_ = corr.translation().y();
+    it.cyaw_ = yaw_deg(corr);
+    it.jump_m_ = jump_m;
+    it.jump_deg_ = std::fabs(yaw_deg(res));
+    it.lo_x_ = lo.translation().x();
+    it.lo_y_ = lo.translation().y();
+    it.score_ = score;
+    run_.push_back(it);
+    ++run_count_;
+    while (static_cast<int>(run_.size()) > std::max(1, options_.frames_)) run_.pop_front();
+    if (disabled_ || verify_n_ >= 0 || options_.frames_ <= 0 || static_cast<int>(run_.size()) < options_.frames_) {
+        return Action::kNone;
+    }
+
+    double mx = 0, my = 0, sin_sum = 0, cos_sum = 0, mag_m = 0, mag_deg = 0, min_score = 1e9;
+    for (const auto& r : run_) {
+        mx += r.cx_;
+        my += r.cy_;
+        sin_sum += std::sin(r.cyaw_ * M_PI / 180.0);
+        cos_sum += std::cos(r.cyaw_ * M_PI / 180.0);
+        mag_m += r.jump_m_;
+        mag_deg += r.jump_deg_;
+        min_score = std::min(min_score, r.score_);
+    }
+    const double n = static_cast<double>(run_.size());
+    mx /= n;
+    my /= n;
+    mag_m /= n;
+    mag_deg /= n;
+    const double myaw = std::atan2(sin_sum, cos_sum) * 180.0 / M_PI;
+    double spread_m = 0, spread_deg = 0;
+    for (const auto& r : run_) {
+        spread_m = std::max(spread_m, std::hypot(r.cx_ - mx, r.cy_ - my));
+        spread_deg = std::max(spread_deg, std::fabs(wrap(r.cyaw_ - myaw)));
+    }
+    const double travel = std::hypot(run_.back().lo_x_ - run_.front().lo_x_, run_.back().lo_y_ - run_.front().lo_y_);
+
+    std::vector<double> sorted(scores_.begin(), scores_.end());
+    std::nth_element(sorted.begin(), sorted.begin() + sorted.size() / 2, sorted.end());
+    const double score_th = std::max(options_.min_score_, options_.score_ratio_ * sorted[sorted.size() / 2]);
+
+    if (min_score < score_th || spread_m > options_.consistency_m_ || spread_deg > options_.consistency_deg_ ||
+        travel < options_.min_travel_m_ || mag_m > options_.max_m_ || mag_deg > options_.max_deg_) {
+        return Action::kNone;
+    }
+    ++relocks_;
+    last_corr_m_ = mag_m;
+    last_corr_deg_ = mag_deg;
+    correction_ = corr;  // 本帧的修正：调用方整帧采信 NDT，即输出 = corr * guess
+    verify_n_ = 0;
+    verify_fail_n_ = 0;
+    LOG(WARNING) << std::fixed << std::setprecision(3) << "ndt jump relock #" << relocks_ << " after " << run_count_
+                 << " consecutive rejects: correction " << mag_m << " m / " << mag_deg << " deg, spread " << spread_m
+                 << " m / " << spread_deg << " deg, LIO travel " << travel << " m, min score " << min_score
+                 << " (th " << score_th << ")";
+    ResetRun();
+    return Action::kAccept;
 }
 
 }  // namespace lightning::loc

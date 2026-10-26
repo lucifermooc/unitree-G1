@@ -146,6 +146,22 @@ bool LidarLoc::Init(const std::string& config_path) {
         yaml.GetOptional("loc_guard", "init_yaw_search_deg", options_.init_yaw_search_deg_);
         yaml.GetOptional("loc_guard", "init_yaw_search_step_deg", options_.init_yaw_search_step_deg_);
         guard_ = LocGuard(g);
+        auto& r = options_.relock_;
+        yaml.GetOptional("loc_guard", "relock_frames", r.frames_);
+        yaml.GetOptional("loc_guard", "relock_min_score", r.min_score_);
+        yaml.GetOptional("loc_guard", "relock_score_ratio", r.score_ratio_);
+        yaml.GetOptional("loc_guard", "relock_consistency_m", r.consistency_m_);
+        yaml.GetOptional("loc_guard", "relock_consistency_deg", r.consistency_deg_);
+        yaml.GetOptional("loc_guard", "relock_min_travel_m", r.min_travel_m_);
+        yaml.GetOptional("loc_guard", "relock_max_m", r.max_m_);
+        yaml.GetOptional("loc_guard", "relock_max_deg", r.max_deg_);
+        yaml.GetOptional("loc_guard", "relock_hint_frames", r.hint_frames_);
+        relock_ = JumpRelock(r);
+        LOG(INFO) << "ndt jump relock: " << (r.frames_ > 0 ? "on" : "off") << ", " << r.frames_
+                  << " consecutive rejects, consistency " << r.consistency_m_ << " m / " << r.consistency_deg_
+                  << " deg, LIO travel >= " << r.min_travel_m_ << " m, score >= max(" << r.min_score_ << ", "
+                  << r.score_ratio_ << " x median), correction <= " << r.max_m_ << " m / " << r.max_deg_
+                  << " deg; need_reloc after " << r.hint_frames_ << " rejects";
         LOG(INFO) << "loc guard: " << (g.enabled_ ? (g.freeze_ ? "freeze" : "warn only") : "disabled")
                   << (g.freeze_ && g.rollback_ ? " + rollback" : "") << ", window " << g.window_sec_ << " s / "
                   << g.window_dist_ << " m, max drift " << g.max_drift_m_ << " m (static " << g.max_drift_static_m_
@@ -437,6 +453,7 @@ bool LidarLoc::InitWithFP(CloudPtr input, const SE3& fp_pose, bool yaw_search) {
 
         // 重新初始化后守护从头开始
         guard_.Reset();
+        relock_.Reset();
 
         // 进入快速收敛阶段
         fast_converge_frames_ = 0;
@@ -821,23 +838,40 @@ void LidarLoc::Align(const CloudPtr& input) {
     }
     // 单帧跳变检查（2026-09-30）：LIO 一帧内的误差只有厘米级，NDT 结果离 LIO 预测太远多半是错配（走廊沿轴向退化，
     // 分值照样高）。本帧不采信，只按 LO 递推。代价：累计误差一旦超过阈值，NDT 就拉不回来（等同纯 LIO）。
+    // 2026-10-24：偏差一旦超过门限，之后的修正全被拒、永远拉不回来（锁死）。JumpRelock 在连续被拒、修正量一致、
+    // 换了视角、分值正常时解除：本帧整帧采信 NDT，并像回退 / 人工重定位一样重置守护和 PGO（见 loc_guard.h）。
+    bool relocked = false;
     if (converged_ && options_.max_ndt_jump_m_ > 0) {
         const double jump_m = ndt_residual.translation().head<2>().norm();
         const Mat3d R = ndt_residual.rotationMatrix();
         const double jump_deg = std::fabs(std::atan2(R(1, 0), R(0, 0))) * 180.0 / M_PI;
-        if (jump_m > options_.max_ndt_jump_m_ ||
-            (options_.max_ndt_jump_deg_ > 0 && jump_deg > options_.max_ndt_jump_deg_)) {
+        const bool rejected = jump_m > options_.max_ndt_jump_m_ ||
+                              (options_.max_ndt_jump_deg_ > 0 && jump_deg > options_.max_ndt_jump_deg_);
+        const SE3& lo_for_relock = current_lo_pose_set_ ? current_lo_pose_ : guess_from_lo;
+        if (rejected) {
             ++ndt_jump_rejects_;
             LOG(INFO) << "ndt jump rejected: " << jump_m << " m / " << jump_deg << " deg (limit "
                       << options_.max_ndt_jump_m_ << " m / " << options_.max_ndt_jump_deg_ << " deg), score "
                       << fitness_score << ", total rejects " << ndt_jump_rejects_;
             balance = 0.0;
         }
+        const auto action = relock_.Update(rejected, guess_from_lo, current_pose_esti, lo_for_relock, fitness_score);
+        if (action == JumpRelock::Action::kAccept) {
+            relocked = true;
+            balance = 1.0;
+        } else if (action == JumpRelock::Action::kRevert) {
+            // 采信后 NDT 又连续要求同向修正：不是陈旧偏差而是 NDT 自己在拉，撤回上次修正、只跟 LIO
+            relocked = true;  // 同样跳过守护本帧判断并重置守护 / PGO
+            balance = 0.0;
+            guess_from_lo = relock_.RevertCorrection() * guess_from_lo;
+        }
     }
     // 一致性守护：窗口内累积修正超限且 LIO / 腿式里程计不支持时冻结修正并退回（快速收敛阶段不管）
     SE3 guard_pose;
     bool guard_rollback = false;
-    if (converged_ && current_lo_pose_set_) {
+    if (relocked) {
+        guard_.Reset();
+    } else if (converged_ && current_lo_pose_set_) {
         LocGuard::Frame gf;
         gf.timestamp_ = current_time;
         gf.lo_ = current_lo_pose_;
@@ -849,6 +883,10 @@ void LidarLoc::Align(const CloudPtr& input) {
         guard_rollback = guard_.GetRollback(guard_pose);
     }
     current_pose_esti = guess_from_lo * SE3::exp(ndt_residual.log() * balance);
+    if (relocked) {
+        // PGO 窗口里还是锁死时的位姿，不重置会把这次修正平滑掉（同回退 / 人工重定位）
+        external_reinit_done_ = true;
+    }
     if (guard_rollback) {
         // 输出跳回被拉偏之前；PGO 窗口里还是拉偏的位姿，不重置会把回退平滑成慢慢拖回，按人工重定位同样重置 PGO
         current_pose_esti = guard_pose;
@@ -941,6 +979,9 @@ void LidarLoc::Align(const CloudPtr& input) {
         localization_result_.timestamp_ = current_timestamp_;
         localization_result_.confidence_ = fitness_score;
         localization_result_.guard_status_ = guard_.GetStatus();
+        localization_result_.guard_status_.relocks_ = relock_.Relocks();
+        localization_result_.guard_status_.jump_reject_run_ = relock_.RunLength();
+        localization_result_.guard_status_.need_reloc_ |= relock_.NeedReloc();
         if (match_fail_count_ < 100) {
             localization_result_.lidar_loc_valid_ = true;
             localization_result_.status_ = LocalizationStatus::GOOD;
