@@ -1,0 +1,18 @@
+# 开机全局定位初始化（src/test/loc_global_init/README.md）
+loc_global_init:
+  ros__parameters:
+    lidar_topic: /livox/lidar
+    imu_topic: /livox/imu
+    n_frames: 10            # 叠加帧数（静止时 ~1 s）
+    gyro_max: 0.15          # 采集窗口内 |gyro| 超过它视为在动，等下一窗口
+    dry_run: false          # true = 只算、只报 ~/status，不发 /initialpose
+    wait_loc_timeout: 30.0  # 等 lightning 自己初始化出 map->base_link 的时间
+    agree_xy: 0.3           # lightning 当前输出与搜索结果差在这之内 → 不动它
+    agree_yaw_deg: 5.0
+    verify_timeout: 20.0    # 发 /initialpose 后等 lightning 收敛到目标附近
+    verify_xy: 0.3
+    verify_yaw_deg: 5.0
+    max_attempts: 2
+    # 搜索参数（bev_search.SearchParams）；门限依据见 README
+    search.min_score: 0.35
+    search.max_second_ratio: 0.85
