@@ -97,6 +97,11 @@ ros2 launch g1_sim sim.launch.py           # 然后浏览器打开 http://localh
 
 
 bash /opt/G1/docker/g1_docker.sh shell
+# 本机看网页：1) 建隧道，把机器人的 rosbridge(9090) 转到本机 9090（只需建一次，再建会报 Address already in use）
+ssh -f -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -L 9090:localhost:9090 -p 30524 unitree@47.108.223.180
+# 2) 本机起网页（隧道只转 rosbridge，网页文件要本机自己提供），浏览器打开 http://localhost:8080/?host=localhost
+cd ~/project/unitree-G1
+python3 lightning_ws/src/g1_web/serve.py 8080
 
 bash /opt/G1/nav_controller_switch.sh shim   # 改成 shim，重启 g1-robot 后生效
 bash /opt/G1/nav_controller_switch.sh rpp    # 切回现在的 RPP
