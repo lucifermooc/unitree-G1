@@ -39,7 +39,8 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 SRC = os.path.realpath(os.path.join(HERE, "..", ".."))
 os.environ["ROS_LOCALHOST_ONLY"] = "1"
 BT = os.path.join(SRC, "aid_navigation2/behavior_trees/navigate_w_recovery_backup_and_replanning_only_if_path_becomes_invalid.xml")
-CTRL = {"rpp": os.path.join(HERE, "ctrl_rot09.yaml"), "shim": os.path.join(HERE, "ctrl_shim.yaml")}
+CTRL = {"rpp": os.path.join(HERE, "ctrl_rot09.yaml"), "shim": os.path.join(HERE, "ctrl_shim.yaml"),
+         "shim_settle": os.path.join(HERE, "ctrl_shim_settle.yaml")}
 SIM_ARGS = ("-p bridge.mode:=deployed -p bridge.walk_min_wz:=0.0 -p bridge.min_wz:=0.32 -p bridge.wz_stop:=0.15 "
             "-p bridge.min_vx:=0.3 -p bridge.turn_min_vx:=0.0 -p bridge.max_reverse_vx:=0.3 -p bridge.min_reverse_vx:=0.25 "
             "-p odom.spin_step_speed:=0.11 -p odom.spin_step_sigma:=0.06")

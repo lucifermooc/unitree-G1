@@ -5,7 +5,8 @@
 发 /sim/scan（base_link 系），标记 2.5 m、射线清除 3.0 m，障碍走开后格子会被清掉。
 机器人用 g1_orin_sim.py（Orin 30524 实测模型，当前部署的 A + 原地转 0.9 + 蟹行航向补偿），行为树用仓库当前的（每 2 s 或失效时重规划）。
 
-python3 -B run_shim_test.py [--scenes ...] [--ctrls rpp shim] [--seeds 0 1] [--jobs 6]
+python3 -B run_shim_test.py [--scenes ...] [--ctrls rpp shim] [--seeds 0 1] [--jobs 6] [--set 名称:参数=值,...]
+--set 同 run_scurve_test.py：名称 = 基础控制器+后缀（如 shim_settle+BD），在 FollowPath 下改参数作为一个新变体。
 需要先编译 aid_nav_shim_controller（humble），并用 --shim-install 指向它的 install 目录。
 结果：results/shim_<时间>/summary.csv、每次的 rec_*.npz 和 launch 日志。
 """
@@ -20,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import rclpy
+import yaml
 from geometry_msgs.msg import PoseStamped, Twist
 from nav2_msgs.action import NavigateToPose
 from nav_msgs.msg import Path
@@ -34,7 +36,8 @@ import run_replan_test as rr
 
 HERE = rr.HERE
 RES, ORIGIN = rr.RES, rr.ORIGIN
-CTRLS = {"rpp": os.path.join(HERE, "ctrl_rot09.yaml"), "shim": os.path.join(HERE, "ctrl_shim.yaml")}
+CTRLS = {"rpp": os.path.join(HERE, "ctrl_rot09.yaml"), "shim": os.path.join(HERE, "ctrl_shim.yaml"),
+         "shim_settle": os.path.join(HERE, "ctrl_shim_settle.yaml")}
 COSTMAP_EXTRA = os.path.join(HERE, "obstacle_scan_sim.yaml")
 SCAN_N, SCAN_MAX, SCAN_STEP = 360, 3.5, 0.025
 BODY_R = 0.25        # G1 机身实际半宽（肩宽约 0.45~0.5 m）；骨盆离障碍 < 0.25 m 记为"碰上"
@@ -147,14 +150,26 @@ def clearance(scene, tru, t0):
     return d
 
 
-def run_one(scene, ctrl, seed, domain, out_dir, shim_install, timeout):
+def ctrl_file(name, sets, out_dir):
+    src = CTRLS[name.split("+")[0]]
+    if name not in sets:
+        return src
+    doc = yaml.safe_load(open(src))
+    doc["controller_server"]["ros__parameters"]["FollowPath"].update(sets[name])
+    path = os.path.join(out_dir, f"ctrl_{name}.yaml")
+    with open(path, "w") as f:
+        yaml.safe_dump(doc, f, allow_unicode=True)
+    return path
+
+
+def run_one(scene, ctrl, seed, domain, out_dir, shim_install, timeout, ctrl_yaml):
     walls, drawn, sensed, movers, start, goal = SCENES[scene]
     map_yaml = write_map(scene, out_dir)
     tag = f"{scene}_{ctrl}_s{seed}"
     log = open(os.path.join(out_dir, f"launch_{tag}.log"), "w")
     cmd = ["ros2", "launch", os.path.join(HERE, "sim_orin_launch.py"), f"map:={map_yaml}",
            f"x:={start[0]}", f"y:={start[1]}", f"yaw_deg:={start[2]}", f"sim_args:={rr.SIM_ARGS} -p model.seed:={seed}",
-           f"controller_extra:={CTRLS[ctrl]}", f"bt_xml:={os.path.join(rr.SRC, rr.BT_REL)}",
+           f"controller_extra:={ctrl_yaml}", f"bt_xml:={os.path.join(rr.SRC, rr.BT_REL)}",
            f"costmap_extra:={COSTMAP_EXTRA}"]
     env = dict(os.environ, ROS_DOMAIN_ID=str(domain), ROS_LOCALHOST_ONLY="1")
     if shim_install:
@@ -279,6 +294,33 @@ def analyze(out, rec):
     out["near_fallback"] = sum("near controller failed" in m for m in msgs)
     out["mppi_fail"] = sum("Optimizer fail" in m or "fail to compute" in m.lower() for m in msgs)
     out["stalls"] = sum("no progress along path" in m for m in msgs)
+    out["settle"] = sum("NavShim settle:" in m for m in msgs)
+    out["settle_skip"] = sum("NavShim settle skipped" in m for m in msgs)
+    out["debounce"] = sum("NavShim debounce" in m for m in msgs)
+    # 顿挫（同 run_scurve_test.py）：走 <-> 转 直接换 + 停不到 1 s 又动（按 /cmd_vel，离起点 / 终点 0.8 m 内不算）
+    stomp = 0
+    if len(cmd):
+        c = np.where(cmd[:, 1] >= 0.05, 1, np.where(cmd[:, 1] <= -0.05, 2, np.where(
+            np.abs(cmd[:, 2]) >= 0.15, np.where(cmd[:, 2] > 0, 3, 4), 0)))
+        segs = []
+        i = 0
+        while i < len(c):
+            j = i
+            while j + 1 < len(c) and c[j + 1] == c[i]:
+                j += 1
+            segs.append((cmd[i, 0], cmd[j, 0] + 0.1, c[i]))
+            i = j + 1
+        start = SCENES[scene][4]
+        for k in range(1, len(segs)):
+            t, a, b = segs[k][0], segs[k - 1][2], segs[k][2]
+            p = tru[min(np.searchsorted(tru[:, 0], t), len(tru) - 1), 1:3]
+            if min(math.hypot(p[0] - goal[0], p[1] - goal[1]), math.hypot(p[0] - start[0], p[1] - start[1])) < 0.8:
+                continue
+            if b != 0 and a != 0 and a != b:
+                stomp += 1
+            elif b != 0 and a == 0 and segs[k - 1][1] - segs[k - 1][0] < 1.0 and k >= 2 and segs[k - 2][2] != 0:
+                stomp += 1
+    out["stomp"] = stomp
     return out
 
 
@@ -288,13 +330,15 @@ def fmt(r):
             f"最近 {g('robot_min')} <0.5m {g('lt0.5_s', '.1f')} s 碰上 {g('contact_s', '.1f')} s | "
             f"到点 {g('goal_err')} m / {g('yaw_err_deg', '.0f')}° | 停 {g('stopped_s', '.1f')} s | "
             f"collision ahead {r.get('collision_ahead', '-')} 恢复 {r.get('recoveries', '-')} | "
-            f"near {r.get('to_near', '-')} rotate {r.get('rotates', '-')} 回退 {r.get('near_fallback', '-')} 卡住 {r.get('stalls', '-')}")
+            f"near {r.get('to_near', '-')} rotate {r.get('rotates', '-')} 回退 {r.get('near_fallback', '-')} 卡住 {r.get('stalls', '-')} | "
+            f"顿挫 {r.get('stomp', '-')} 站稳 {r.get('settle', '-')} 跳过 {r.get('settle_skip', '-')} 防抖 {r.get('debounce', '-')}")
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--scenes", nargs="+", default=list(SCENES), choices=list(SCENES))
-    ap.add_argument("--ctrls", nargs="+", default=["rpp", "shim"], choices=list(CTRLS))
+    ap.add_argument("--ctrls", nargs="+", default=["rpp", "shim"])
+    ap.add_argument("--set", nargs="*", default=[], help="名称:参数=值[,参数=值]")
     ap.add_argument("--seeds", nargs="+", type=int, default=[0])
     ap.add_argument("--jobs", type=int, default=6)
     ap.add_argument("--domain", type=int, default=140)
@@ -303,11 +347,16 @@ def main():
     a = ap.parse_args()
     out_dir = os.path.join(HERE, "results", time.strftime("shim_%Y%m%d_%H%M%S"))
     os.makedirs(out_dir)
+    sets = {}
+    for s in a.set:
+        name, kv = s.split(":", 1)
+        sets[name] = {k: yaml.safe_load(v) for k, v in (p.split("=") for p in kv.split(","))}
+    files = {c: ctrl_file(c, sets, out_dir) for c in a.ctrls}
     jobs = [(s, c, sd) for s in a.scenes for sd in a.seeds for c in a.ctrls]
 
     def work(i_job):
         i, (scene, ctrl, seed) = i_job
-        out, rec = run_one(scene, ctrl, seed, a.domain + i, out_dir, a.shim_install, a.timeout)
+        out, rec = run_one(scene, ctrl, seed, a.domain + i, out_dir, a.shim_install, a.timeout, files[ctrl])
         out = analyze(out, rec)
         np.savez_compressed(os.path.join(out_dir, f"rec_{scene}_{ctrl}_s{seed}.npz"), truth=np.array(rec["truth"]),
                             cmd=np.array(rec["cmd"]), t0=out.get("t0", 0.0), allow_pickle=True)
@@ -318,7 +367,7 @@ def main():
         rows = list(pool.map(work, enumerate(jobs)))
     keys = ["scene", "ctrl", "seed", "status", "time_s", "robot_min", "lt0.5_s", "contact_s", "goal_err", "yaw_err_deg",
             "path_len", "plans", "stopped_s", "collision_ahead", "recoveries", "to_near", "rotates", "near_fallback",
-            "mppi_fail", "stalls"]
+            "mppi_fail", "stalls", "stomp", "settle", "settle_skip", "debounce"]
     with open(os.path.join(out_dir, "summary.csv"), "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=keys, extrasaction="ignore")
         w.writeheader()

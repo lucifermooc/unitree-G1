@@ -65,6 +65,17 @@ void NavShimController::configure(
   stall_timeout_ = p("stall_timeout", rclcpp::ParameterValue(10.0)).as_double();
   stall_min_progress_ = p("stall_min_progress", rclcpp::ParameterValue(0.25)).as_double();
   stall_detour_reset_ = p("stall_detour_reset", rclcpp::ParameterValue(0.3)).as_double();
+  final_rotate_ = p("final_rotate", rclcpp::ParameterValue(true)).as_bool();
+  final_rotate_min_vel_ = p("final_rotate_min_vel", rclcpp::ParameterValue(0.35)).as_double();
+  final_rotate_decel_ = p("final_rotate_decel", rclcpp::ParameterValue(1.5)).as_double();
+  final_rotate_xy_margin_ = p("final_rotate_xy_margin", rclcpp::ParameterValue(0.05)).as_double();
+  settle_time_ = p("settle_time", rclcpp::ParameterValue(0.6)).as_double();
+  settle_max_time_ = p("settle_max_time", rclcpp::ParameterValue(1.2)).as_double();
+  settle_max_linear_ = p("settle_max_linear", rclcpp::ParameterValue(0.15)).as_double();
+  settle_max_angular_ = p("settle_max_angular", rclcpp::ParameterValue(0.3)).as_double();
+  settle_mid_path_ = p("settle_mid_path", rclcpp::ParameterValue(false)).as_bool();
+  motion_vx_threshold_ = p("motion_vx_threshold", rclcpp::ParameterValue(0.05)).as_double();
+  motion_wz_threshold_ = p("motion_wz_threshold", rclcpp::ParameterValue(0.15)).as_double();
 
   double freq = 10.0;
   node->get_parameter("controller_frequency", freq);
@@ -89,6 +100,11 @@ void NavShimController::configure(
   RCLCPP_INFO(
     logger_, "NavShimController '%s': stall check %s (%.2f m in %.1f s)", plugin_name_.c_str(),
     stall_timeout_ > 0.0 ? "on" : "off", stall_min_progress_, stall_timeout_);
+  RCLCPP_INFO(
+    logger_, "NavShimController '%s': final rotate %s (min %.2f rad/s, decel %.2f), settle %.2f s (max %.2f s, "
+    "odom < %.2f m/s / %.2f rad/s, %s)", plugin_name_.c_str(), final_rotate_ ? "on" : "off", final_rotate_min_vel_,
+    final_rotate_decel_, settle_time_, settle_max_time_, settle_max_linear_, settle_max_angular_,
+    settle_mid_path_ ? "everywhere" : "arrival / start only");
 }
 
 void NavShimController::cleanup()
@@ -126,6 +142,9 @@ void NavShimController::setPlan(const nav_msgs::msg::Path & path)
       have_goal_ = true;
       align_pending_ = true;
       stall_armed_ = false;
+      final_rotate_active_ = false;
+      final_rotate_dir_ = 0;
+      rotate_dir_ = 0;
     }
   }
   primary_->setPlan(path);
@@ -230,7 +249,14 @@ geometry_msgs::msg::TwistStamped NavShimController::rotateCommand(
   // 同 RotationShim / RPP：恒定转速 + 角加速度限幅。G1 足迹是圆（robot_radius），原地转不改变占用，不做碰撞检查。
   geometry_msgs::msg::TwistStamped cmd;
   cmd.header = pose.header;
-  const double target = std::copysign(rotate_angular_vel_, angle);
+  // 锁转向（同 final_rotate）：路径方向在身后 ±30° 内时定位 / 步态抖动会让最短方向来回换
+  // （实机 10-27 11:27:40 出发点 D 起步原地转，左转中换成右转）
+  int dir = angle > 0.0 ? 1 : -1;
+  if (rotate_dir_ != 0 && dir != rotate_dir_ && std::fabs(angle) > 2.6) {
+    dir = rotate_dir_;
+  }
+  rotate_dir_ = dir;
+  const double target = dir * rotate_angular_vel_;
   const double dw = max_angular_accel_ * control_duration_;
   cmd.twist.angular.z = std::clamp(target, velocity.angular.z - dw, velocity.angular.z + dw);
   return cmd;
@@ -254,6 +280,131 @@ void NavShimController::switchMode(Mode m, const char * why)
   RCLCPP_INFO(logger_, "NavShim mode %s -> %s (%s)", modeName(mode_), modeName(m), why);
   mode_ = m;
   stall_armed_ = false;
+  final_rotate_active_ = false;
+  final_rotate_dir_ = 0;
+  rotate_dir_ = 0;
+}
+
+NavShimController::Motion NavShimController::classify(const geometry_msgs::msg::Twist & t) const
+{
+  if (t.linear.x >= motion_vx_threshold_) {
+    return Motion::WALK;
+  }
+  if (t.linear.x <= -motion_vx_threshold_) {
+    return Motion::REVERSE;
+  }
+  if (std::fabs(t.angular.z) >= motion_wz_threshold_) {
+    return t.angular.z > 0.0 ? Motion::SPIN_LEFT : Motion::SPIN_RIGHT;
+  }
+  return Motion::STOP;
+}
+
+static const char * motionName(int m)
+{
+  static const char * names[] = {"stop", "walk", "reverse", "spin left", "spin right"};
+  return names[m];
+}
+
+void NavShimController::settle(geometry_msgs::msg::TwistStamped & cmd, const geometry_msgs::msg::Twist & velocity)
+{
+  const rclcpp::Time now = clock_->now();
+  const Motion c = classify(cmd.twist);
+  // 同一动作被短暂打断（MPPI 单次失败 / FollowPath 中止后马上重发，controller_server 发了几拍 0）而身体还在按这个动作动：
+  // 直接接上，不算"停后再动"（实机 10-27 11:22 走着 0.43 m/s 时 MPPI 失败一拍，被这里拦成了急停）
+  bool resume = false;
+  switch (c) {
+    case Motion::WALK: resume = velocity.linear.x >= settle_max_linear_; break;
+    case Motion::REVERSE: resume = velocity.linear.x <= -settle_max_linear_; break;
+    case Motion::SPIN_LEFT: resume = velocity.angular.z >= settle_max_angular_; break;
+    case Motion::SPIN_RIGHT: resume = velocity.angular.z <= -settle_max_angular_; break;
+    default: break;
+  }
+  resume = resume && c == last_moving_;
+  // 路途中间（这个动作和上一个动作都来自 MPPI 跟线）不等，只管到点（NEAR）和起步（ROTATE 及其后第一步）
+  const bool mid_path = emit_mode_ == Mode::PRIMARY && last_moving_mode_ == Mode::PRIMARY;
+  if (c != Motion::STOP && settle_time_ > 0.0 && have_moved_ && c != last_emitted_ && !resume &&
+    (settle_mid_path_ || !mid_path))
+  {
+    // 换动作或停后再动：离上次动作至少 settle_time，且实测速度已降下来（最多等 settle_max_time）
+    const double since = (now - t_last_moving_).seconds();
+    const bool slow = std::fabs(velocity.linear.x) < settle_max_linear_ &&
+      std::fabs(velocity.angular.z) < settle_max_angular_;
+    if (since < settle_time_ || (!slow && since < settle_max_time_)) {
+      if (!settling_) {
+        RCLCPP_INFO(
+          logger_, "NavShim settle: %s -> %s, hold 0 (%.2f s after last motion, odom vx %.2f wz %.2f)",
+          motionName(static_cast<int>(last_moving_)), motionName(static_cast<int>(c)), since, velocity.linear.x,
+          velocity.angular.z);
+      }
+      settling_ = true;
+      cmd.twist = geometry_msgs::msg::Twist();
+      last_emitted_ = Motion::STOP;
+      return;
+    }
+  }
+  settling_ = false;
+  last_emitted_ = c;
+  if (c != Motion::STOP) {
+    last_moving_ = c;
+    last_moving_mode_ = emit_mode_;
+    t_last_moving_ = now;
+    have_moved_ = true;
+  }
+}
+
+bool NavShimController::finalRotate(
+  const geometry_msgs::msg::PoseStamped & robot, double dist, nav2_core::GoalChecker * goal_checker,
+  geometry_msgs::msg::TwistStamped & cmd)
+{
+  geometry_msgs::msg::Pose pose_tol;
+  geometry_msgs::msg::Twist vel_tol;
+  if (!goal_checker || !goal_checker->getTolerances(pose_tol, vel_tol)) {
+    return false;
+  }
+  const double xy_tol = pose_tol.position.x;
+  if (!final_rotate_active_) {
+    // 留 final_rotate_xy_margin：刚好压在容差边上时 goal_checker 那一刻可能还没判进（仿真 0.2999 m 进来，转完漂到 0.32 m，
+    // 航向对了却永远不判到达，原地等到 progress_checker 失败）
+    if (dist > xy_tol - final_rotate_xy_margin_) {
+      return false;
+    }
+    final_rotate_active_ = true;
+    final_rotate_dir_ = 0;
+    RCLCPP_INFO(logger_, "NavShim: within xy tolerance (%.2f m < %.2f - %.2f), final rotate", dist, xy_tol,
+      final_rotate_xy_margin_);
+  } else if (dist > xy_tol) {
+    // 原地转时身体漂出了 xy 容差（G1 转一次 13~41 cm）：goal_checker 未必锁住了位置（FollowPath 重发会复位它），交回 RPP 再进点
+    final_rotate_active_ = false;
+    final_rotate_dir_ = 0;
+    RCLCPP_INFO(logger_, "NavShim: drifted out of xy tolerance (%.2f m > %.2f) during final rotate, re-approach", dist,
+      xy_tol);
+    return false;
+  }
+  const double tol = std::fabs(tf2::getYaw(pose_tol.orientation));
+  const double err = angles::shortest_angular_distance(
+    tf2::getYaw(robot.pose.orientation), tf2::getYaw(path_.poses.back().pose.orientation));
+  cmd.twist = geometry_msgs::msg::Twist();
+  if (std::fabs(err) <= tol) {
+    return true;   // goal_checker 本周期判到达
+  }
+  // 锁转向：目标在身后 ±30° 内时（|err| > 150°）定位 / 步态抖动会让最短方向来回换，沿用已选的方向
+  int dir = err > 0.0 ? 1 : -1;
+  if (final_rotate_dir_ != 0 && dir != final_rotate_dir_ && std::fabs(err) > 2.6) {
+    dir = final_rotate_dir_;
+  }
+  final_rotate_dir_ = dir;
+  // 减速：离容差边界还剩 Δ 时 v = sqrt(v_min^2 + 2·a·Δ)，到边界时降到 final_rotate_min_vel（不再从全速一步到 0）
+  const double v = std::min(
+    rotate_angular_vel_, std::sqrt(
+      final_rotate_min_vel_ * final_rotate_min_vel_ + 2.0 * final_rotate_decel_ * (std::fabs(err) - tol)));
+  const double target = dir * v;
+  const double dw = max_angular_accel_ * control_duration_;
+  if (target * last_wz_ > 0.0 && std::fabs(target) < std::fabs(last_wz_)) {
+    cmd.twist.angular.z = target;   // 减速按曲线走，不受加速度限幅
+  } else {
+    cmd.twist.angular.z = std::clamp(target, last_wz_ - dw, last_wz_ + dw);
+  }
+  return true;
 }
 
 geometry_msgs::msg::TwistStamped NavShimController::computeVelocityCommands(
@@ -261,14 +412,36 @@ geometry_msgs::msg::TwistStamped NavShimController::computeVelocityCommands(
   const geometry_msgs::msg::Twist & velocity,
   nav2_core::GoalChecker * goal_checker)
 {
-  // 控制循环断开（本次 FollowPath 被中止 / 新的 FollowPath 开始）时清掉卡住状态
+  // 控制循环断开（本次 FollowPath 被中止 / 新的 FollowPath 开始）时清掉卡住状态；断开期间 controller_server 已发 0
   const rclcpp::Time now = clock_->now();
   if (have_last_call_ && (now - last_call_).seconds() > 2.0 * control_duration_) {
     stalled_ = false;
     stall_armed_ = false;
+    last_emitted_ = Motion::STOP;
+    last_wz_ = 0.0;
   }
   last_call_ = now;
   have_last_call_ = true;
+  geometry_msgs::msg::TwistStamped cmd;
+  try {
+    cmd = computeCommand(pose, velocity, goal_checker);
+  } catch (...) {
+    // 失败时 controller_server 发 0（或中止），之后再动要先停稳
+    last_emitted_ = Motion::STOP;
+    last_wz_ = 0.0;
+    throw;
+  }
+  emit_mode_ = mode_;
+  settle(cmd, velocity);
+  last_wz_ = cmd.twist.angular.z;
+  return cmd;
+}
+
+geometry_msgs::msg::TwistStamped NavShimController::computeCommand(
+  const geometry_msgs::msg::PoseStamped & pose,
+  const geometry_msgs::msg::Twist & velocity,
+  nav2_core::GoalChecker * goal_checker)
+{
   if (stalled_) {
 #ifdef AID_NAV2_HUMBLE
     throw nav2_core::PlannerException("NavShim: stalled, waiting for controller_server to abort");
@@ -292,6 +465,13 @@ geometry_msgs::msg::TwistStamped NavShimController::computeVelocityCommands(
   }
 
   if (mode_ == Mode::NEAR) {
+    if (final_rotate_) {
+      geometry_msgs::msg::TwistStamped cmd;
+      cmd.header = pose.header;
+      if (finalRotate(robot, dist, goal_checker, cmd)) {
+        return cmd;
+      }
+    }
     try {
       return near_->computeVelocityCommands(pose, velocity, goal_checker);
     } catch (const std::exception & e) {
@@ -343,6 +523,11 @@ void NavShimController::reset()
   align_pending_ = false;
   stall_armed_ = false;
   stalled_ = false;
+  final_rotate_active_ = false;
+  final_rotate_dir_ = 0;
+  rotate_dir_ = 0;
+  last_emitted_ = Motion::STOP;   // 衔接计时（t_last_moving_）保留：下一个目标起步也要等停稳
+  last_wz_ = 0.0;
   primary_->reset();
   near_->reset();
 }

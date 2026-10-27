@@ -328,6 +328,21 @@ class G1ParamTests(unittest.TestCase):
         # 卡住检测要比 progress_checker 宽松（否则 progress_checker 先判失败，本检测没意义）且留出等人让路的时间
         self.assertGreaterEqual(fp['stall_timeout'], sc['progress_checker']['movement_time_allowance'] * 0.5)
         self.assertGreater(fp['stall_min_progress'], sc['progress_checker']['required_movement_radius'])
+        # 换动作前站稳 / 到点转身减速：显式写在覆盖里（代码默认开，删行≠关），数值 = 仿真 ctrl_shim_settle.yaml
+        sim = yaml.safe_load((SRC / 'test/nav_goal_sim/ctrl_shim_settle.yaml').read_text())
+        sim_fp = sim['controller_server']['ros__parameters']['FollowPath']
+        for k in ('settle_time', 'settle_mid_path', 'settle_max_time', 'settle_max_linear', 'settle_max_angular', 'motion_vx_threshold',
+                  'motion_wz_threshold', 'final_rotate', 'final_rotate_min_vel', 'final_rotate_decel', 'final_rotate_xy_margin'):
+            self.assertIn(k, fp, k)
+            self.assertEqual(fp[k], sim_fp[k], k)
+        self.assertGreaterEqual(fp['settle_max_time'], fp['settle_time'])
+        # 动作类别阈值 = 桥接的抬速边界（vx 0.05 起抬到 0.3、|wz| 0.15 起算转）
+        self.assertEqual(fp['motion_vx_threshold'], 0.05)
+        self.assertEqual(fp['motion_wz_threshold'], 0.15)
+        # 到位转速要在本机原地转死区（|wz| <= 0.29 不转）之上，且不超过起步原地转速度
+        self.assertGreaterEqual(fp['final_rotate_min_vel'], 0.30)
+        self.assertLessEqual(fp['final_rotate_min_vel'], fp['rotate_angular_vel'])
+        self.assertLess(fp['final_rotate_xy_margin'], sc['goal_checker']['xy_goal_tolerance'])
 
     def test_orin_backup_overlay(self):
         """无 Thor 背包的 Orin 30524 只经本机覆盖文件放开后退：BT BackUp、smoother 下限、桥接上限三处要一致。"""

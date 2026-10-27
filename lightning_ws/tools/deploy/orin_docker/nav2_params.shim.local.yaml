@@ -33,6 +33,31 @@ controller_server:
       stall_timeout: 10.0
       stall_min_progress: 0.25
       stall_detour_reset: 0.3
+      # 换动作（走 / 左转 / 右转 / 后退 / 停后再动）前先站稳：上个动作结束后至少站 settle_time 秒，且 odom 降到
+      # |vx| < settle_max_linear、|wz| < settle_max_angular（最多等 settle_max_time 秒）才放行下一个动作。
+      # 实机 10-26 到点急停后 0.1 s 就原地转、转完 0.5 s 就起步，身体还在冲 / 转（摔倒风险）。settle_time 0.0 = 关。
+      # 同一动作短暂中断（MPPI 单次失败 / 中止重发）而身体还在按它动时直接接上（代码里，无参数）。
+      # 10-27 实机 settle_time 0.6：展厅 S 弯 MPPI 走 / 转来回切，身体已停也每次站满 0.6 s，13 s 原地不动触发卡住检测 → 0.3。
+      # 动作类别按发给桥之前的指令判：|vx| >= motion_vx_threshold 算走 / 退，否则 |wz| >= motion_wz_threshold 算转。
+      # settle_mid_path false：只在到点（近目标 / 到点转身）和起步（起步原地转、对正后第一步）等，路途中间（MPPI 跟线：
+      # 弯道、绕障、MPPI 失败重发）不等 = 10-26 晚不等站稳时的行为（实机 S 弯 16 趟一路走过去）。
+      # 10-27 上午全程等（0.6）：S 弯 MPPI 走 / 转犹豫、单次失败都变成"刹停—站—起步"，噔噔噔差点摔。true = 全程等。
+      settle_time: 0.3
+      settle_mid_path: false
+      settle_max_time: 1.2
+      settle_max_linear: 0.15
+      settle_max_angular: 0.3
+      motion_vx_threshold: 0.05
+      motion_wz_threshold: 0.15
+      # 到点最后转身：进到 xy 容差内（留 final_rotate_xy_margin 余量）后不再交给 RPP，原地转向目标朝向，方向一开始定下
+      # （误差 > 2.6 rad 时不换向），快到位按 final_rotate_decel 减速、到位时 final_rotate_min_vel；漂出 xy 容差就交回 RPP。
+      # 实机 10-26 原来转一半换向 / 0.9 rad/s 急刹多转 ~9°。false = 关（回到 RPP 自己转）。
+      final_rotate: true
+      final_rotate_min_vel: 0.35
+      final_rotate_decel: 1.5
+      final_rotate_xy_margin: 0.05
+      # 仿真（src/test/nav_goal_sim ctrl_shim_settle.yaml，回放 10-26 实机目标 114 趟）：身体没停稳就换动作 3.2 → 0.2 次/趟，
+      # 停稳后航向误差 9° → 4°，到点 114/114，每趟多 ~2 s；避障场景结果不变。
 
       # ---- primary：MPPI，参数照抄 aid_navigation2/param/nav2_params.yaml 的 FollowPathMPPI（注释见那里） ----
       # 与 RPP 同名的 max_robot_pose_search_dist / transform_tolerance 也落在 FollowPath.* 下，这里是 MPPI 的值

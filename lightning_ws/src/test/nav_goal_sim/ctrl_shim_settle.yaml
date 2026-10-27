@@ -1,0 +1,72 @@
+# 方案 shim + 动作衔接（2026-10-26）：同 ctrl_shim.yaml，另加 到点原地转由外壳做（锁转向 + 减速）、换动作前先停稳。
+# 起因：实机停步 0.1 s 后就原地转（身体还在 0.27 m/s）、转完 0.5 s 就起步，G1 重心前倾 / 偏一侧时换动作易摔。
+#
+# 方案 shim（参考轮式 128.23 的 aid_pure_pursuit_shim_controller）：离目标 >= 0.6 m 用 MPPI（跟线 + 局部避障），
+# < 0.6 m 用 RPP（= 现状 ctrl_rot09.yaml 的到点 + 原地转 0.9），航向偏离路径 > 45° 时先原地转。
+# 叠加在 nav2_sim_params.yaml（MPPI 参数，FollowPath.*）+ nav2_orin_rpp.yaml 之后。插件在 aid_nav_shim_controller。
+controller_server:
+  ros__parameters:
+    FollowPath:
+      plugin: "aid_nav_shim_controller::NavShimController"
+      primary_controller: "nav2_mppi_controller::MPPIController"
+      near_goal_controller: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+      near_goal_distance: 0.6
+      near_goal_exit_hysteresis: 0.3
+      near_goal_fallback_to_primary: true
+      rotate_to_heading: true
+      rotate_only_on_new_goal: true   # 只在新目标起步时对正（行驶中检查会和 MPPI 绕障来回抢）
+      rotate_start_angle: 0.785
+      rotate_stop_angle: 0.3
+      rotate_angular_vel: 0.9
+      max_angular_accel: 3.2
+      forward_sampling_distance: 0.6
+      # 卡住检测：MPPI 阶段沿路径剩余长度 10 s 内没缩短 0.25 m 就报失败，交给行为树恢复（窄道收窄里会原地挪动不报失败）
+      stall_timeout: 10.0
+      stall_min_progress: 0.25
+      stall_detour_reset: 0.3
+      # 到点（进 goal_checker xy 容差 - 0.05）后由外壳原地转：锁转向、接近目标朝向时按 1.5 rad/s² 减速到 0.35
+      final_rotate: true
+      final_rotate_min_vel: 0.35
+      final_rotate_decel: 1.5
+      final_rotate_xy_margin: 0.05   # 进容差 5 cm 才开始转；转时漂出容差就交回 RPP 再进点
+      # 动作衔接：走 / 后退 / 左转 / 右转 之间切换、或停下后再动，先发 0 至少 0.3 s，
+      # 且 odom 降到 0.15 m/s、0.3 rad/s 以下（最多等 1.2 s）。阈值同速度桥（vx 0.05、|wz| 0.15）
+      settle_time: 0.3
+      settle_mid_path: false   # 路途中间（MPPI 跟线）不等，只管到点 / 起步（10-27 实机全程等在 S 弯噔噔噔）
+      settle_max_time: 1.2
+      settle_max_linear: 0.15
+      settle_max_angular: 0.3
+      motion_vx_threshold: 0.05
+      motion_wz_threshold: 0.15
+      # nav2_orin_rpp.yaml 的 RPP 值也落在 FollowPath.* 下，MPPI 同名参数改回仓库 FollowPathMPPI 的值
+      max_robot_pose_search_dist: 2.5
+      transform_tolerance: 0.1
+      ObstaclesCritic:
+        inflation_radius: 0.85
+      # RPP（近目标），= nav2_orin_rpp.yaml + ctrl_rot09.yaml
+      near:
+        desired_linear_vel: 0.40
+        lookahead_dist: 0.6
+        min_lookahead_dist: 0.4
+        max_lookahead_dist: 0.9
+        lookahead_time: 1.5
+        use_velocity_scaled_lookahead_dist: false
+        max_robot_pose_search_dist: 1.0
+        transform_tolerance: 0.1
+        allow_reversing: false
+        use_rotate_to_heading: true
+        rotate_to_heading_angular_vel: 0.9
+        rotate_to_heading_min_angle: 0.785
+        max_angular_accel: 3.2
+        use_regulated_linear_velocity_scaling: true
+        regulated_linear_scaling_min_radius: 0.9
+        regulated_linear_scaling_min_speed: 0.25
+        use_cost_regulated_linear_velocity_scaling: false
+        cost_scaling_dist: 0.6
+        cost_scaling_gain: 1.0
+        inflation_cost_scaling_factor: 8.0
+        approach_velocity_scaling_dist: 0.6
+        min_approach_linear_velocity: 0.05
+        use_collision_detection: true
+        max_allowed_time_to_collision_up_to_carrot: 1.0
+        use_interpolation: true

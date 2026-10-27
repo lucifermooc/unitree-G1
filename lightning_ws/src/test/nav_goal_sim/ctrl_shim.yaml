@@ -21,6 +21,9 @@ controller_server:
       stall_timeout: 10.0
       stall_min_progress: 0.25
       stall_detour_reset: 0.3
+      # 到点原地转 / 动作衔接（2026-10-26 加）：这份 = 实机现状（RPP 自己转，不等停稳），对照用；新方案见 ctrl_shim_settle.yaml
+      final_rotate: false
+      settle_time: 0.0
       # nav2_orin_rpp.yaml 的 RPP 值也落在 FollowPath.* 下，MPPI 同名参数改回仓库 FollowPathMPPI 的值
       max_robot_pose_search_dist: 2.5
       transform_tolerance: 0.1
