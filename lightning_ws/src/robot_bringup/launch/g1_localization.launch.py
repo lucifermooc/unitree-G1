@@ -21,6 +21,8 @@ def generate_launch_description():
         DeclareLaunchArgument('start_rviz', default_value='false'),
         DeclareLaunchArgument('pub_registered_scan', default_value='false',
                               description='发布 map 系配准点云 /lightning/registered_scan（诊断用）'),
+        DeclareLaunchArgument('loc_params_overlay', default_value='',
+                              description='合并到 lightning default_livox.yaml 之上的本机参数文件（空 = 不合并）'),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(lightning_launch),
             launch_arguments={
@@ -30,6 +32,7 @@ def generate_launch_description():
                 'with_2dui': LaunchConfiguration('with_2dui'),
                 'start_rviz': LaunchConfiguration('start_rviz'),
                 'pub_registered_scan': LaunchConfiguration('pub_registered_scan'),
+                'params_overlay': LaunchConfiguration('loc_params_overlay'),
             }.items(),
         ),
     ])

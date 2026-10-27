@@ -55,7 +55,7 @@ def _status_manager(context):
             'startup_mode': LaunchConfiguration('requested_mode').perform(context),
             'default_map_dir': LaunchConfiguration('map_dir').perform(context),
             'localization_launch_args': _launch_args(
-                context, 'with_ui', 'with_2dui', 'start_rviz', 'pub_registered_scan'),
+                context, 'with_ui', 'with_2dui', 'start_rviz', 'pub_registered_scan', 'loc_params_overlay'),
             # Nav2 的数值参数全在 aid_navigation2/param/nav2_params.yaml 里，只透传开关。
             'navigation_launch_args': _launch_args(
                 context, 'use_realsense_obstacles', 'use_d435_mark_filter',
@@ -141,6 +141,7 @@ def generate_launch_description():
             'with_2dui': with_2dui,
             'start_rviz': start_rviz,
             'pub_registered_scan': LaunchConfiguration('pub_registered_scan'),
+            'loc_params_overlay': LaunchConfiguration('loc_params_overlay'),
         }.items(),
     )
 
@@ -221,6 +222,9 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'nav_params_overlay', default_value='',
             description='合并到 aid_navigation2/param/nav2_params.yaml 之上的本机参数文件（空 = 不合并）'),
+        DeclareLaunchArgument(
+            'loc_params_overlay', default_value='',
+            description='合并到 lightning default_livox.yaml 之上的本机参数文件（空 = 不合并），只作用于定位'),
         DeclareLaunchArgument('start_rosbridge', default_value='true'),
         DeclareLaunchArgument('start_backend', default_value='true'),
         DeclareLaunchArgument('with_ui', default_value='false'),

@@ -1,0 +1,7 @@
+# Orin 30524 本机定位覆盖：robot.launch.py loc_params_overlay:= 加载，按键合并到 lightning default_livox.yaml 之上（只作用于定位）。
+# 改了要拷到 /opt/G1/lightning.local.yaml 并 md5 核对，重启 g1-robot 生效。
+loc_guard:
+  # 10-27：/initialpose 不再做 ±15° 航向搜索。开机全局定位 loc_global_init 给的位姿已经准（航向误差 <1°），
+  # 航向搜索的粗匹配（5 m 体素）会把准初值带到错解（10-24 实机 1 m）。实机剩的沿走廊 0.24 m 偏差不是它造成的（CLAUDE.md 4.2）。
+  # 代价：前端"在地图上拖动设置位姿"也不再搜航向，拖的航向要比较准（NDT 自己能收十几度以内）。
+  init_yaw_search_deg: 0.0

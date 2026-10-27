@@ -22,6 +22,7 @@ G1 自带的 Orin NX（PC2，`192.168.123.164`）是 JetPack 5.1.1 / Ubuntu 20.0
 - `/opt/G1/cyclonedds_g1.local.xml`：网卡名改成 `eth0`，`dds_env.sh` 优先读它。
 - `/opt/G1/G1_MID360s_config.local.json`：`host_ip` 改成 `.164`。
 - `/opt/G1/g1_autostart.local.env`：D435 序列号、`livox_config:=`，语义地图用 `use_fp16:=false`。
+- `/opt/G1/lightning.local.yaml`（源：本目录同名文件，10-27 起）：`G1_ROBOT_ARGS` 里 `loc_params_overlay:=` 加载，按键合并到 lightning `default_livox.yaml` 之上，只作用于定位。现在只有 `loc_guard.init_yaw_search_deg: 0`（`/initialpose` 不做航向搜索，配合开机全局定位 `src/test/loc_global_init`）。
 
 **不要在 Orin 上执行 `g1_service.sh install`**：它会装回主机版 unit，而主机上没有 jazzy。其余子命令（start/stop/restart/status/log）照常用。
 

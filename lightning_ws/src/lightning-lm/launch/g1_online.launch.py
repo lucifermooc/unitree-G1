@@ -11,6 +11,15 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
+def merge_overlay(base, overlay):
+    """按键递归合并（列表 / 标量整体替换），给单台机器的本机参数用"""
+    for k, v in overlay.items():
+        if isinstance(v, dict) and isinstance(base.get(k), dict):
+            merge_overlay(base[k], v)
+        else:
+            base[k] = v
+
+
 def setup(context):
     value = lambda key: LaunchConfiguration(key).perform(context)
     enabled = lambda key: value(key).lower() in ('1', 'true', 'yes', 'on')
@@ -22,6 +31,13 @@ def setup(context):
     ET.fromstring(description)  # Validate XML; robot_state_publisher owns static TF.
     with open(value('config'), encoding='utf-8') as stream:
         config = yaml.safe_load(stream)
+    overlay_file = value('params_overlay')
+    if overlay_file:
+        overlay_file = os.path.expanduser(overlay_file)
+        if not os.path.isfile(overlay_file):
+            raise RuntimeError('params_overlay does not exist: ' + overlay_file)
+        with open(overlay_file, encoding='utf-8') as stream:
+            merge_overlay(config, yaml.safe_load(stream) or {})
     config['common']['livox_lidar_topic'] = value('lidar_topic')
     config['common']['imu_topic'] = value('imu_topic')
     # G2P5 uses height above the configured floor, not height below the LiDAR.
@@ -89,6 +105,7 @@ def generate_launch_description():
                     with_ui='false', with_2dui='false', start_rviz='false',
                     pub_registered_scan='false',
                     rviz_config='',
+                    params_overlay='',   # 合并到 config 之上的本机参数文件（空 = 不合并）
                     floor_height='', min_obstacle_height='',
                     max_obstacle_height='',
                     livox_config=os.path.join(get_package_share_directory('livox_ros_driver2'),
