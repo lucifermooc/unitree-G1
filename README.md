@@ -103,8 +103,8 @@ ssh -f -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -L 9090:localhos
 cd ~/project/unitree-G1
 python3 lightning_ws/src/g1_web/serve.py 8080
 
-bash /opt/G1/nav_controller_switch.sh shim   # 改成 shim，重启 g1-robot 后生效
-bash /opt/G1/nav_controller_switch.sh rpp    # 切回现在的 RPP
+# 切控制器（10-27 起不再用 nav_controller_switch.sh）：把下面文件里 FollowPath（shim）和 FollowPathRPP 两个块名对调，重启 g1-robot
+#   /opt/G1/lighting_ws/install/aid_navigation2/share/aid_navigation2/param/nav2_params.yaml（仓库 src 那份也要同步改）
 
 
 # 进入容器后：后退 vx=-0.1，持续 1 s，到时间本体自己停

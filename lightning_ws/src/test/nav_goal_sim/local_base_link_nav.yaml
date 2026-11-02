@@ -1,4 +1,4 @@
-# 与 tools/deploy/orin_docker/nav2_params.local.yaml 一致：只有 local costmap（controller / RPP / goal_checker 跟着）用 base_link_nav
+# 与 aid_navigation2/param/nav2_params.yaml 一致（10-27 前在 Orin 覆盖文件里）：只有 local costmap（controller / RPP / goal_checker 跟着）用 base_link_nav
 local_costmap:
   local_costmap:
     ros__parameters:

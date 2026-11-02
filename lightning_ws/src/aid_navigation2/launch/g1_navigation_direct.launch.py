@@ -11,8 +11,8 @@ D435 两个标记源（realsense_mark / realsense_mark_tall）吃 g1_nav_bridge/
 use_d435_mark_filter=false 时两个标记源改回原始点云（A/B 用）。realsense_clear 始终吃原始点云。
 MID360 障碍在 mid360_voxel_layer（STVL，2026-09-24 从 2D obstacle_layer 迁移），STVL 没有 obstacle_min_range，
 所以始终另起 g1_nav_bridge/scan_range_filter 剔除离雷达 0.25 m 内的机身回波，以及 base_link 水平 0.5 m（足迹半径）内的点。
-nav_params_overlay=<yaml> 时把该文件按键递归合并到 nav2_params.yaml 之上（列表整体替换），给单台机器的本机参数用
-（如无 Thor 背包的 Orin 30524：/opt/G1/nav2_params.local.yaml），不在仓库里，部署不会覆盖。
+nav_params_overlay=<yaml> 时把该文件按键递归合并到 nav2_params.yaml 之上（列表整体替换），只给临时试参数用
+（2026-10-27 起 Orin 的值都在 nav2_params.yaml 里，不再用 /opt/G1/nav2_params*.local.yaml）。
 开关都是默认值且没有覆盖文件时，yaml 原封不动交给 nav2，`ros2 param get` 与文件一一对应。
 """
 import copy

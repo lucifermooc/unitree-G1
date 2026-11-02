@@ -1,5 +1,5 @@
 # Orin 30524 当前导航配置（叠加在 nav2_sim_params.yaml 之后，humble 写法），给 sim_orin_launch.py 用。
-# 来源：aid_navigation2/param/nav2_params.yaml（RPP、smoother、inflation 0.85）+ tools/deploy/orin_docker/nav2_params.local.yaml
+# 来源：aid_navigation2/param/nav2_params.yaml（RPP、smoother、inflation 0.85）+ 当时的 Orin 覆盖文件（10-27 起已收进 nav2_params.yaml 的 FollowPathRPP）
 # （rotate_to_heading 0.6、xy 容差 0.3、yaw 容差 0.30）。规划器见 planner_orin.yaml（cost_travel_multiplier 10）。
 controller_server:
   ros__parameters:

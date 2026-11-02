@@ -18,11 +18,27 @@ G1 自带的 Orin NX（PC2，`192.168.123.164`）是 JetPack 5.1.1 / Ubuntu 20.0
 | `container_setup.sh` | `/opt/G1/docker/` | 新建容器时由 `g1_docker.sh` 自动执行（root）：装 Pangolin 0.9.3（lightning thirdparty 里的 zip，lightning 编译硬依赖） |
 | `install_orin.sh` | — | 安装上面这些、sudoers、DDS 缓冲、Qdrant 容器（`qdrant/qdrant:v1.19.1`，restart always） |
 
-本机专属文件（不在仓库里）：
-- `/opt/G1/cyclonedds_g1.local.xml`：网卡名改成 `eth0`，`dds_env.sh` 优先读它。
-- `/opt/G1/G1_MID360s_config.local.json`：`host_ip` 改成 `.164`。
-- `/opt/G1/g1_autostart.local.env`：D435 序列号、`livox_config:=`，语义地图用 `use_fp16:=false`。
-- `/opt/G1/lightning.local.yaml`（源：本目录同名文件，10-27 起）：`G1_ROBOT_ARGS` 里 `loc_params_overlay:=` 加载，按键合并到 lightning `default_livox.yaml` 之上，只作用于定位。现在只有 `loc_guard.init_yaw_search_deg: 0`（`/initialpose` 不做航向搜索，配合开机全局定位 `src/test/loc_global_init`）。
+配置（2026-10-27 起全部在 src 的默认文件里，Thor 已停用，不再分机型、不再用 `/opt/G1/*.local.*` 覆盖）：
+| 内容 | 文件（机器上改 install 里同路径的那份，仓库也要同步改） |
+|---|---|
+| Nav2：控制器 `FollowPath`（shim）/ 备用 `FollowPathRPP`、容差 0.3、BackUp 行为树、`base_link_nav`、smoother 后退下限 | `aid_navigation2/param/nav2_params.yaml` |
+| 速度桥：`min_wz 0.32`、`walk_min_wz 0`、后退 0.3、蟹行补偿 `crab_deg 10` | `g1_nav_bridge/config/nav_bridge.yaml` |
+| 定位：`loc_guard.init_yaw_search_deg 0` | `lightning-lm/config/default_livox.yaml` |
+| DDS 网卡 `eth0` | `robot_bringup/system/cyclonedds_g1.xml` |
+| MID360 `host_ip .164` | `livox_ros_driver2/config/G1_MID360s_config.json` |
+| D435 关彩色、深度 848x480x15 | `robot_bringup/launch/robot.launch.py` 默认值 |
+| 语义地图 `use_fp16:=false` | `robot_bringup/script/g1_autostart.env` |
+
+**切控制器**：把 `nav2_params.yaml` 里 `FollowPath`（shim）和 `FollowPathRPP` 两个块名对调（shim 那块改叫 `FollowPathShim`），重启 g1-robot。
+
+每台机器只剩 `/opt/G1/g1_autostart.local.env` 一行：`G1_ROBOT_ARGS="realsense_serial_no:='<该机 D435i 序列号>'"`
+（30524 `250122078132`，30423 `254343062813`）。`*_params_overlay:=` 参数还在，只给临时试参数用。
+
+从旧覆盖方式迁移（部署新版 robot_bringup / aid_navigation2 / g1_nav_bridge / lightning / livox_ros_driver2 时一起做）：
+1. `local.env` 改成上面那一行（去掉 `livox_config:=`、`realsense_enable_color:=`、`realsense_depth_profile:=`、三个 `*_overlay:=`、`G1_SEMANTIC_ARGS`）。
+2. `/opt/G1/` 下 `nav2_params.local.yaml`、`nav2_params.shim.local.yaml`、`nav_bridge.local.yaml`、`lightning.local.yaml`、
+   `cyclonedds_g1.local.xml`、`G1_MID360s_config.local.json`、`nav_controller_switch.sh` 挪进备份目录（新版不再读它们）。
+3. 重启后 `ros2 param get` 核对 `FollowPath.plugin`、`settle_time`、`min_wz`、`crab_deg`，看 glog `init yaw search +-0 deg`。
 
 **不要在 Orin 上执行 `g1_service.sh install`**：它会装回主机版 unit，而主机上没有 jazzy。其余子命令（start/stop/restart/status/log）照常用。
 
@@ -45,7 +61,7 @@ semantic：`--only semantic_map`）。`g1_service.sh restart/stop` 本身也会�
 3. 同步源码到 `/opt/G1/lighting_ws/src`，`rsync` 排除规则和 `deploy_to_robot.sh` 相同。
 4. `bash g1_docker.sh build-image`，然后在容器里全量编译（`run` 会先自动创建容器 `g1`）：
    `g1_docker.sh run bash -c 'cd /opt/G1/lighting_ws && export PYTHONNOUSERSITE=1 && colcon build --cmake-args -DROS_EDITION=ROS2 -DDISTRO_ROS=jazzy -DBUILD_WITH_MARCH_NATIVE=ON'`
-5. `bash install_orin.sh`，写好上面三个本机专属文件，再执行 `g1_service.sh restart`。容器 `g1` 会在第一次 exec 时自动创建。
+5. `bash install_orin.sh`，写好 `/opt/G1/g1_autostart.local.env`（只有 D435 序列号一行），再执行 `g1_service.sh restart`。容器 `g1` 会在第一次 exec 时自动创建。
 
 之后的增量部署照常：`tools/deploy/deploy_to_robot.sh g1-orin <包>`。脚本发现机器上有 `/opt/G1/docker/g1_docker.sh` 时，会在容器里编译。
 

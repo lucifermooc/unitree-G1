@@ -3,9 +3,9 @@
 # 用法: source /opt/G1/lighting_ws/install/robot_bringup/share/robot_bringup/system/dds_env.sh
 _dds_self=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source /home/unitree/unitree_ros2/setup.sh >/dev/null   # 官方环境：RMW + 本体网段
-# 本机网卡名与 Thor（enP2p1s0）不同时（如 Orin 是 eth0），放一份本机覆盖 /opt/G1/cyclonedds_g1.local.xml（不在仓库里）
-_dds_xml="${G1_DDS_XML:-/opt/G1/cyclonedds_g1.local.xml}"
-[ -f "$_dds_xml" ] || _dds_xml="${_dds_self}/cyclonedds_g1.xml"
+# 默认用同目录的 cyclonedds_g1.xml（网卡 eth0）；临时换一份用 G1_DDS_XML=<文件>。
+# 2026-10-27 起不再读 /opt/G1/cyclonedds_g1.local.xml（Orin 的网卡名已写进 cyclonedds_g1.xml）。
+_dds_xml="${G1_DDS_XML:-${_dds_self}/cyclonedds_g1.xml}"
 export CYCLONEDDS_URI="file://${_dds_xml}"   # 覆盖其默认 URI，见 cyclonedds_g1.xml 注释
 unset _dds_self _dds_xml
 echo "CYCLONEDDS_URI=$CYCLONEDDS_URI"

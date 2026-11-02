@@ -15,10 +15,10 @@ esac
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 G1_WS="${G1_WS:-/opt/G1/lighting_ws}"
 G1_ROBOT_ARGS=""
-G1_SEMANTIC_ARGS="use_fp16:=true model_name:=${HOME}/models/bge-m3"
+G1_SEMANTIC_ARGS="use_fp16:=false model_name:=${HOME}/models/bge-m3"
 # shellcheck source=g1_autostart.env
 [ -f "$SCRIPT_DIR/g1_autostart.env" ] && source "$SCRIPT_DIR/g1_autostart.env"
-# 本机专属覆盖（相机序列号等），不在仓库里，rsync 不会覆盖
+# 本机专属覆盖（只放 D435 序列号），不在仓库里，rsync 不会覆盖
 G1_LOCAL_ENV="${G1_LOCAL_ENV:-/opt/G1/g1_autostart.local.env}"
 [ -f "$G1_LOCAL_ENV" ] && source "$G1_LOCAL_ENV"
 
@@ -51,7 +51,7 @@ export LANG="${LANG:-C.UTF-8}"
 log "RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-} ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-}"
 
 # CycloneDDS 绑定的网卡（连机器人本体/雷达的网段）没有 IP 时所有节点都会起不来：一直等到它就绪。
-DDS_XML="${CYCLONEDDS_URI#file://}"   # dds_env.sh 选定的那份（可能是本机覆盖 /opt/G1/cyclonedds_g1.local.xml）
+DDS_XML="${CYCLONEDDS_URI#file://}"   # dds_env.sh 选定的那份（默认 system/cyclonedds_g1.xml，G1_DDS_XML 可换）
 IFACE="$(grep -o 'NetworkInterface name="[^"]*"' "$DDS_XML" | head -1 | cut -d'"' -f2)"
 if [ -n "$IFACE" ]; then
   waited=0

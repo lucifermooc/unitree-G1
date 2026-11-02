@@ -28,8 +28,9 @@ class G1ParamTests(unittest.TestCase):
         self.globl = self.nav['global_costmap']['global_costmap']['ros__parameters']
 
     def test_direct_frames(self):
-        for p in (self.local, self.globl):
-            self.assertEqual((p['global_frame'], p['robot_base_frame']), ('map', 'base_link'))
+        # local 用蟹行补偿帧 base_link_nav（controller / goal_checker 取位姿用），global 仍是 base_link（见 test_crab_compensation）
+        self.assertEqual((self.local['global_frame'], self.local['robot_base_frame']), ('map', 'base_link_nav'))
+        self.assertEqual((self.globl['global_frame'], self.globl['robot_base_frame']), ('map', 'base_link'))
         b = self.nav['behavior_server']['ros__parameters']
         self.assertEqual((b['local_frame'], b['global_frame']), ('map', 'map'))
         c = self.safe['collision_monitor']['ros__parameters']
@@ -200,19 +201,21 @@ class G1ParamTests(unittest.TestCase):
         self.assertEqual(bridge['turn_min_vx'], 0.0)   # 非 0 时到点原地转会变成圆弧，横移 0.3~0.4 m
         g = self.nav['planner_server']['ros__parameters']['GridBased']
         self.assertEqual(g['plugin'], 'nav2_smac_planner::SmacPlanner2D')
-        f = self.nav['controller_server']['ros__parameters']['FollowPath']
-        self.assertEqual(f['plugin'], 'nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController')
-        self.assertTrue(f['use_rotate_to_heading'])
-        self.assertFalse(f['allow_reversing'])        # G1 倒走会摔
-        self.assertGreaterEqual(f['rotate_to_heading_angular_vel'], bridge['min_wz'])  # 再小会被桥接抬到 min_wz
-        # RPP 进 xy 容差就停下原地转、转进 yaw 容差就停：0.2 时实测提前 0.14~0.2 m 停、航向差 6~8°
-        gc = self.nav['controller_server']['ros__parameters']['goal_checker']
-        self.assertLessEqual(gc['xy_goal_tolerance'], 0.10)
-        self.assertLessEqual(gc['yaw_goal_tolerance'], 0.10)
-        self.assertTrue(gc['stateful'])   # 用户实测 false 到不了点
+        c = self.nav['controller_server']['ros__parameters']
         sm = self.nav['velocity_smoother']['ros__parameters']
-        self.assertLessEqual(f['desired_linear_vel'], sm['max_velocity'][0])
-        self.assertLessEqual(f['rotate_to_heading_angular_vel'], sm['max_velocity'][2])
+        # 两份 RPP 参数：shim 的近目标段 FollowPath.near、备用纯 RPP 块 FollowPathRPP
+        self.assertEqual(c['FollowPathRPP']['plugin'], 'nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController')
+        for f in (c['FollowPath']['near'], c['FollowPathRPP']):
+            self.assertTrue(f['use_rotate_to_heading'])
+            self.assertFalse(f['allow_reversing'])        # 正常行走不倒车（后退只给 BT BackUp）
+            self.assertGreaterEqual(f['rotate_to_heading_angular_vel'], bridge['min_wz'])  # 再小会被桥接抬到 min_wz
+            self.assertLessEqual(f['desired_linear_vel'], sm['max_velocity'][0])
+            self.assertLessEqual(f['rotate_to_heading_angular_vel'], sm['max_velocity'][2])
+        # 无背包的 G1 原地转绕右侧 ~0.28 m 的点画圈，0.10 进不了容差（10-24）；收紧要和蟹行补偿一起（CLAUDE.md 3.7.5）
+        gc = c['goal_checker']
+        self.assertEqual(gc['xy_goal_tolerance'], 0.3)
+        self.assertEqual(gc['yaw_goal_tolerance'], 0.3)
+        self.assertTrue(gc['stateful'])   # 用户实测 false 到不了点
         # 停车减速要快：慢减速段会被 cmdvel_to_sport 抬回 min_vx / min_wz，到点后多转多走
         for axis, minimum in ((0, bridge['min_vx']), (2, bridge['min_wz'])):
             stop_time = minimum / abs(sm['max_decel'][axis])
@@ -237,7 +240,7 @@ class G1ParamTests(unittest.TestCase):
         self.assertEqual(s['feedback'], 'OPEN_LOOP')
         self.assertNotIn('odom_topic', s)
         self.assertEqual(s['max_velocity'], [0.45, 0.0, 0.9])
-        self.assertEqual(s['min_velocity'], [0.0, 0.0, -0.9])
+        self.assertEqual(s['min_velocity'], [-0.3, 0.0, -0.9])   # x 下限只给 BT BackUp，见 test_reverse_only_for_backup
         self.assertEqual(s['deadband_velocity'], [0.0, 0.0, 0.0])
         c = self.safe['collision_monitor']['ros__parameters']
         self.assertEqual((c['cmd_vel_in_topic'], c['cmd_vel_out_topic']), ('/cmd_vel', '/cmd_vel_safe'))
@@ -248,8 +251,8 @@ class G1ParamTests(unittest.TestCase):
         self.assertGreater(bridge['duration'], 0.0)
 
     def test_obstacle_critic_matches_local_inflation(self):
-        """ObstaclesCritic 复算代价，几何必须与 local_costmap 的 inflation 层一致（保留的 MPPI 参数，回退时用）。"""
-        f = self.nav['controller_server']['ros__parameters']['FollowPathMPPI']
+        """ObstaclesCritic 复算代价，几何必须与 local_costmap 的 inflation 层一致（shim 的远处段 MPPI，参数在 FollowPath.*）。"""
+        f = self.nav['controller_server']['ros__parameters']['FollowPath']
         oc = f['ObstaclesCritic']
         inf = self.local['inflation_layer']
         self.assertTrue(oc['enabled'])
@@ -262,34 +265,46 @@ class G1ParamTests(unittest.TestCase):
 
     def test_controller_envelope(self):
         p = self.nav['controller_server']['ros__parameters']
-        m = p['FollowPathMPPI']   # 保留的 MPPI 参数（回退时改回 FollowPath）
+        m = p['FollowPath']   # shim：MPPI 参数在 FollowPath.*，RPP 在 FollowPath.near.*
+        self.assertEqual(m['primary_controller'], 'nav2_mppi_controller::MPPIController')
         self.assertAlmostEqual(m['model_dt'], 1. / p['controller_frequency'])
         self.assertEqual(m['vx_min'], 0.0)   # 不后退
         self.assertEqual(m['vx_max'], 0.45)
         self.assertEqual(m['wz_max'], 0.9)
-        self.assertNotIn('FollowPathMPPI', p['controller_plugins'])
+        # 只加载 FollowPath（行为树写死 controller_id="FollowPath"）；FollowPathRPP 是换控制器时对调名字用的备用块
+        self.assertEqual(p['controller_plugins'], ['FollowPath'])
+        self.assertNotIn('FollowPathMPPI', p)
         b = self.nav['behavior_server']['ros__parameters']
         self.assertEqual((b['max_rotational_vel'], b['min_rotational_vel']), (0.9, 0.8))
 
-    def test_never_reverse(self):
-        """G1 收到负的前进速度会摔倒：三道防线都不得放宽。"""
+    def test_reverse_only_for_backup(self):
+        """无背包的 G1 实测能直线后退（10-24，-0.1 不动、-0.3 退 0.25 m / 1.5 s），只放开 BT BackUp 脱困：
+        BT BackUp、smoother 下限、桥接上限三处一致；控制器（MPPI / RPP）正常行走仍不给负 vx。"""
         c = self.nav['controller_server']['ros__parameters']
-        self.assertEqual(c['FollowPathMPPI']['vx_min'], 0.0)
-        f = c['FollowPath']
-        self.assertIn('RegulatedPurePursuit', f['plugin'])
-        self.assertFalse(f['allow_reversing'])
-        s = self.nav['velocity_smoother']['ros__parameters']
-        self.assertGreaterEqual(s['min_velocity'][0], 0.0)
-        bt = (ROOT / 'behavior_trees' /
-              'navigate_w_recovery_and_replanning_only_if_path_becomes_invalid.xml').read_text()
-        self.assertNotIn('<BackUp', bt)      # 恢复行为不得倒车
+        self.assertEqual(c['FollowPath']['vx_min'], 0.0)
+        self.assertFalse(c['FollowPath']['near']['allow_reversing'])
+        self.assertFalse(c['FollowPathRPP']['allow_reversing'])
+        bt_name = self.nav['bt_navigator']['ros__parameters']['default_nav_to_pose_bt_xml'].rsplit('/', 1)[1]
+        self.assertEqual(bt_name, 'navigate_w_recovery_backup_and_replanning_only_if_path_becomes_invalid.xml')
+        bt = (ROOT / 'behavior_trees' / bt_name).read_text()
+        backup = re.search(r'<BackUp [^>]*backup_dist="([\d.]+)" backup_speed="([\d.]+)"', bt)
+        self.assertIsNotNone(backup)
+        dist, speed = map(float, backup.groups())
+        self.assertLessEqual(dist, 0.3)
+        self.assertNotIn('DriveOnHeading', bt)
+        plain = (ROOT / 'behavior_trees' /
+                 'navigate_w_recovery_and_replanning_only_if_path_becomes_invalid.xml').read_text()
+        self.assertNotIn('<BackUp', plain)      # 不带 BackUp 的原树保留
+        smoother_min = self.nav['velocity_smoother']['ros__parameters']['min_velocity']
+        bp = yaml.safe_load((SRC / 'g1_nav_bridge/config/nav_bridge.yaml').read_text())['g1_cmdvel_to_sport']['ros__parameters']
+        self.assertAlmostEqual(smoother_min[0], -bp['max_reverse_vx'])
+        self.assertLessEqual(speed, bp['max_reverse_vx'])            # 不被钳
+        self.assertLessEqual(bp['max_reverse_vx'], 0.3)              # 实测只到 0.3
+        self.assertGreaterEqual(bp['min_reverse_vx'], 0.2)           # 实测 -0.1 不动
+        self.assertLessEqual(bp['min_reverse_vx'], bp['max_reverse_vx'])
         bridge = (SRC / 'g1_nav_bridge/src/cmdvel_to_sport.cpp').read_text()
         self.assertIn('velocity[0] = 0.0F;', bridge)   # 桥接层兜底钳位
-        self.assertIn('declare_parameter<double>("max_reverse_vx", 0.0)', bridge)   # 代码默认不放开
-        bp = yaml.safe_load((SRC / 'g1_nav_bridge/config/nav_bridge.yaml').read_text())
-        self.assertEqual(bp['g1_cmdvel_to_sport']['ros__parameters']['max_reverse_vx'], 0.0)
-        self.assertTrue(self.nav['bt_navigator']['ros__parameters']['default_nav_to_pose_bt_xml']
-                        .endswith('/navigate_w_recovery_and_replanning_only_if_path_becomes_invalid.xml'))
+        self.assertIn('declare_parameter<double>("max_reverse_vx", 0.0)', bridge)   # 代码默认不放开，靠 yaml 显式写
 
     def test_bt_periodic_replanning(self):
         """两棵导航树都要定时重规划：只靠 IsPathValid 时，规划后才出现的障碍只要不把路径压进 253 就不改道。"""
@@ -301,34 +316,23 @@ class G1ParamTests(unittest.TestCase):
             self.assertLessEqual(float(timer.group(1)), 5.0)
             self.assertIn('<IsPathValid path="{path}"/>', bt)
 
-    def test_orin_shim_overlay(self):
-        """Orin 30524 的 shim 版覆盖（nav_controller_switch.sh 切换）：除控制器外与 nav2_params.local.yaml 合并结果一致；
-        near（RPP）= 现状 RPP 的生效参数，primary（MPPI）= 仓库 FollowPathMPPI，vx_min 恒 0。"""
-        orin = SRC.parent / 'tools/deploy/orin_docker'
-        rpp_nav, shim_nav = copy.deepcopy(self.nav), copy.deepcopy(self.nav)
-        direct.merge_overlay(rpp_nav, yaml.safe_load((orin / 'nav2_params.local.yaml').read_text()))
-        self.assertTrue(direct.merge_overlay(shim_nav, yaml.safe_load((orin / 'nav2_params.shim.local.yaml').read_text())))
-        rc = rpp_nav['controller_server']['ros__parameters']
-        sc = shim_nav['controller_server']['ros__parameters']
-        for k in ('bt_navigator', 'velocity_smoother', 'local_costmap', 'global_costmap', 'planner_server', 'behavior_server'):
-            self.assertEqual(shim_nav[k], rpp_nav[k], k)
-        self.assertEqual({k: v for k, v in sc.items() if k != 'FollowPath'}, {k: v for k, v in rc.items() if k != 'FollowPath'})
+    def test_shim_controller(self):
+        """FollowPath = shim（远处 MPPI、近目标 RPP）；FollowPathRPP = 备用纯 RPP。两块都只给正 vx。"""
+        sc = self.nav['controller_server']['ros__parameters']
         fp = sc['FollowPath']
         self.assertEqual(fp['plugin'], 'aid_nav_shim_controller::NavShimController')
-        rpp = {k: v for k, v in rc['FollowPath'].items() if k != 'plugin'}
-        self.assertEqual({k: fp['near'][k] for k in rpp}, rpp)
-        mppi = {k: v for k, v in rc['FollowPathMPPI'].items() if k != 'plugin'}
-        self.assertEqual({k: fp[k] for k in mppi}, mppi)
+        self.assertEqual(fp['near_goal_controller'], 'nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController')
+        self.assertNotIn('plugin', fp['near'])
         self.assertEqual(fp['vx_min'], 0.0)
         self.assertFalse(fp['near']['allow_reversing'])
         self.assertEqual(fp['rotate_angular_vel'], fp['near']['rotate_to_heading_angular_vel'])
-        inflation = shim_nav['local_costmap']['local_costmap']['ros__parameters']['inflation_layer']
-        self.assertEqual(fp['ObstaclesCritic']['inflation_radius'], inflation['inflation_radius'])
-        self.assertEqual(fp['ObstaclesCritic']['cost_scaling_factor'], inflation['cost_scaling_factor'])
+        # 对调名字就能切到纯 RPP：备用块必须是完整的 RPP 参数（与 near 同一套键）
+        self.assertEqual(set(sc['FollowPathRPP']) - {'plugin'}, set(fp['near']))
+        inflation = self.local['inflation_layer']
         # 卡住检测要比 progress_checker 宽松（否则 progress_checker 先判失败，本检测没意义）且留出等人让路的时间
         self.assertGreaterEqual(fp['stall_timeout'], sc['progress_checker']['movement_time_allowance'] * 0.5)
         self.assertGreater(fp['stall_min_progress'], sc['progress_checker']['required_movement_radius'])
-        # 换动作前站稳 / 到点转身减速：显式写在覆盖里（代码默认开，删行≠关），数值 = 仿真 ctrl_shim_settle.yaml
+        # 换动作前站稳 / 到点转身减速：显式写在 yaml 里（代码默认开，删行≠关），数值 = 仿真 ctrl_shim_settle.yaml
         sim = yaml.safe_load((SRC / 'test/nav_goal_sim/ctrl_shim_settle.yaml').read_text())
         sim_fp = sim['controller_server']['ros__parameters']['FollowPath']
         for k in ('settle_time', 'settle_mid_path', 'settle_max_time', 'settle_max_linear', 'settle_max_angular', 'motion_vx_threshold',
@@ -343,55 +347,31 @@ class G1ParamTests(unittest.TestCase):
         self.assertGreaterEqual(fp['final_rotate_min_vel'], 0.30)
         self.assertLessEqual(fp['final_rotate_min_vel'], fp['rotate_angular_vel'])
         self.assertLess(fp['final_rotate_xy_margin'], sc['goal_checker']['xy_goal_tolerance'])
+        self.assertEqual(fp['ObstaclesCritic']['inflation_radius'], inflation['inflation_radius'])
+        self.assertEqual(fp['ObstaclesCritic']['cost_scaling_factor'], inflation['cost_scaling_factor'])
 
-    def test_orin_backup_overlay(self):
-        """无 Thor 背包的 Orin 30524 只经本机覆盖文件放开后退：BT BackUp、smoother 下限、桥接上限三处要一致。"""
-        orin = SRC.parent / 'tools/deploy/orin_docker'
-        nav = copy.deepcopy(self.nav)
-        overlay = yaml.safe_load((orin / 'nav2_params.local.yaml').read_text())
-        self.assertTrue(direct.merge_overlay(nav, overlay))
-        self.assertFalse(direct.merge_overlay(nav, overlay))   # 幂等
-        c = nav['controller_server']['ros__parameters']
-        self.assertFalse(c['FollowPath']['allow_reversing'])    # 正常行走仍不倒车
-        self.assertEqual(c['goal_checker']['xy_goal_tolerance'], 0.3)
-        self.assertEqual(c['goal_checker']['yaw_goal_tolerance'], 0.3)   # 只改覆盖到的键
-        self.assertEqual(c['FollowPath']['rotate_to_heading_angular_vel'], 0.9)
-        bt_name = nav['bt_navigator']['ros__parameters']['default_nav_to_pose_bt_xml'].rsplit('/', 1)[1]
-        bt = (ROOT / 'behavior_trees' / bt_name).read_text()
-        backup = re.search(r'<BackUp [^>]*backup_dist="([\d.]+)" backup_speed="([\d.]+)"', bt)
-        self.assertIsNotNone(backup)
-        dist, speed = map(float, backup.groups())
-        self.assertLessEqual(dist, 0.3)
-        self.assertNotIn('DriveOnHeading', bt)
-        smoother_min = nav['velocity_smoother']['ros__parameters']['min_velocity']
-        bp = yaml.safe_load((orin / 'nav_bridge.local.yaml').read_text())['g1_cmdvel_to_sport']['ros__parameters']
-        self.assertEqual(bp['min_wz'], 0.32)
+    def test_crab_compensation_and_bridge(self):
+        """无背包的 G1 的桥接值（CLAUDE.md 2.6）与走路蟹行补偿帧。"""
+        c = self.nav['controller_server']['ros__parameters']
+        bridge = yaml.safe_load((SRC / 'g1_nav_bridge/config/nav_bridge.yaml').read_text())
+        bp = bridge['g1_cmdvel_to_sport']['ros__parameters']
+        self.assertEqual(bp['min_wz'], 0.32)           # |wz| <= 0.29 完全不转
         # 走路时 wz 原样透传（走路没有原地转的死区，10-25 motion_test）；wz_stop 0.05 那轮更差，守住 0.15
         self.assertEqual(bp['walk_min_wz'], 0.0)
         self.assertEqual(bp['wz_stop'], 0.15)
-        self.assertLessEqual(c['FollowPath']['rotate_to_heading_angular_vel'],
-                             nav['velocity_smoother']['ros__parameters']['max_velocity'][2])
-        # 走路蟹行补偿：只有 local costmap（controller）换成 base_link_nav，且帧名 / 角度与桥的节点一致
-        bridge_default = yaml.safe_load((SRC / 'g1_nav_bridge/config/nav_bridge.yaml').read_text())
-        crab_default = bridge_default['g1_crab_comp_frame']['ros__parameters']
-        crab_orin = yaml.safe_load((orin / 'nav_bridge.local.yaml').read_text())['g1_crab_comp_frame']['ros__parameters']
-        self.assertEqual(crab_default['crab_deg'], 0.0)              # 仓库默认恒等，带 Thor 背包的 G1 不变
-        self.assertGreater(crab_orin['crab_deg'], 5.0)
-        self.assertLess(crab_orin['crab_deg'], 15.0)                 # 实测 +10.3~11.1°
-        local_frame = nav['local_costmap']['local_costmap']['ros__parameters']['robot_base_frame']
-        self.assertEqual(local_frame, crab_default['child_frame'])
-        self.assertEqual(crab_default['parent_frame'], 'base_link')
-        self.assertEqual(nav['global_costmap']['global_costmap']['ros__parameters']['robot_base_frame'], 'base_link')
-        for server in ('bt_navigator', 'behavior_server'):
-            self.assertEqual(nav[server]['ros__parameters']['robot_base_frame'], 'base_link')
         # 10-25 起不再要求贴着 min_wz：慢转（0.35）逆时针漂 0.26~0.67 m，比转过头更糟
-        self.assertGreaterEqual(c['FollowPath']['rotate_to_heading_angular_vel'], bp['min_wz'])
-        self.assertAlmostEqual(smoother_min[0], -bp['max_reverse_vx'])
-        self.assertLessEqual(speed, bp['max_reverse_vx'])            # 不被钳
-        self.assertLessEqual(bp['max_reverse_vx'], 0.3)              # 实测只到 0.3
-        self.assertGreaterEqual(bp['min_reverse_vx'], 0.2)           # 实测 -0.1 不动
-        self.assertLessEqual(bp['min_reverse_vx'], bp['max_reverse_vx'])
-        for f in (ROBOT_LAUNCH, NAV_BRIDGE_LAUNCH, LAUNCH):          # 覆盖文件参数逐层透传
+        for f in (c['FollowPath']['near'], c['FollowPathRPP']):
+            self.assertEqual(f['rotate_to_heading_angular_vel'], 0.9)
+        # 走路蟹行补偿：只有 local costmap（controller）用 base_link_nav，且帧名与桥的节点一致
+        crab = bridge['g1_crab_comp_frame']['ros__parameters']
+        self.assertGreater(crab['crab_deg'], 5.0)
+        self.assertLess(crab['crab_deg'], 15.0)                 # 实测 +10.3~11.1°
+        self.assertEqual(self.local['robot_base_frame'], crab['child_frame'])
+        self.assertEqual(crab['parent_frame'], 'base_link')
+        self.assertEqual(self.globl['robot_base_frame'], 'base_link')
+        for server in ('bt_navigator', 'behavior_server'):
+            self.assertEqual(self.nav[server]['ros__parameters']['robot_base_frame'], 'base_link')
+        for f in (ROBOT_LAUNCH, NAV_BRIDGE_LAUNCH, LAUNCH):          # 临时试参数的覆盖文件参数逐层透传
             self.assertIn('nav_params_overlay', f.read_text())
 
     def test_keepout_layer_present_by_default(self):

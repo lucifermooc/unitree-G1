@@ -4,7 +4,11 @@
 # g1_navigation_direct.launch.py 只做两件事：按 use_keepout / use_realsense_obstacles
 # 删层，然后把本文件交给 navigation2.launch.py。改参数改这里，`ros2 param get` 能对上。
 #
-# 目标发行版只有 jazzy（Thor）：插件名用 `::`，bt_navigator 不写 plugin_lib_names
+# 机器：无 Thor 背包的 G1（Orin，jazzy 跑在容器 g1 里），2026-10-27 起本文件就是它的运行值，不再用 /opt/G1/*.local.yaml 覆盖
+# （Thor 机器已停用；下面带日期的注释里 128.146 / 112.70 的数据来自带 Thor 背包的 G1，作历史依据保留）。
+# 机器上 src 部署后会删，就地改的是 install/aid_navigation2/share/aid_navigation2/param/nav2_params.yaml，仓库这份要同步改，否则下次部署冲掉。
+#
+# 目标发行版只有 jazzy：插件名用 `::`，bt_navigator 不写 plugin_lib_names
 # （用 jazzy 默认全集），controller_server 用复数 progress_checker_plugins。
 # 高度基准：平面模式下 map->base_link 的 z 恒为 0，地面 z=0，所以下面的障碍高度就是 map 系高度。
 # 保留原自定义禁行区层（不是官方 KeepoutFilter），及前端使用的 BT / 规划器。
@@ -23,7 +27,9 @@ bt_navigator:
     # nav2_bt_navigator/navigate_through_poses_w_replanning_and_recovery.xml
     # They can be set here or via a RewrittenYaml remap from a parent launch file to Nav2.
     # default_nav_through_poses_bt_xml: $(find-pkg-share aid_navigation2)/behavior_trees/navigate_through_poses_w_replanning_and_recovery.xml
-    default_nav_to_pose_bt_xml: $(find-pkg-share aid_navigation2)/behavior_trees/navigate_w_recovery_and_replanning_only_if_path_becomes_invalid.xml
+    # 恢复轮换里多一个 BackUp（直线后退 0.25 m 脱困）：无背包的 G1 实测 -0.2 / -0.3 稳定后退、-0.1 不动（2026-10-24，CLAUDE.md 2.6）。
+    # 不带 BackUp 的原树 navigate_w_recovery_and_replanning_only_if_path_becomes_invalid.xml 保留；两棵都有每 2 s 定时重规划。
+    default_nav_to_pose_bt_xml: $(find-pkg-share aid_navigation2)/behavior_trees/navigate_w_recovery_backup_and_replanning_only_if_path_becomes_invalid.xml
     # plugin_lib_names 不再显式列出：jazzy 默认已包含本工程 BT 用到的全部节点
     # （RecoveryNode / RateController / IsPathValid / ClearEntireCostmap / RoundRobin ...），
     # 而旧列表里的若干 humble 库名在 jazzy 不存在，写上会让 bt_navigator 加载失败。
@@ -51,54 +57,64 @@ controller_server:
       plugin: "nav2_controller::SimpleGoalChecker"
       # 2026-10-06 0.20 -> 0.10：RPP 进 xy_goal_tolerance 就停下原地转，0.2 时前台 5 次都提前 0.14~0.2 m 停（均 0.23 m）；
       # 原地转到 yaw_goal_tolerance 内就停，0.2 rad（11.5°）时厕所侧固定差 6~8°。G1 不能倒车，从侧面 0.1 m 外擦过要绕回。
-      xy_goal_tolerance: 0.10
-      yaw_goal_tolerance: 0.10
+      # 无背包的 G1：0.10 -> 0.20 -> 0.3（原地转绕右侧约 0.28 m 的点画圈，目标在圈心附近时进不了 0.10，10-24 11:42 绕 2.5 min）；
+      # yaw 0.30（10-24 19:26 机器上放宽，10-25 写进覆盖文件，10-27 收进本文件）。收紧到 0.15 要和蟹行补偿一起（仿真，CLAUDE.md 3.7.5）。
+      xy_goal_tolerance: 0.3
+      yaw_goal_tolerance: 0.30
       stateful: true
-    # 2026-10-06 控制器 MPPI -> Regulated Pure Pursuit（未仿真，直接上 128.146 实测）。
-    # MPPI 离目标近时由 GoalCritic 直接拉向终点、到点后原地转，当时 cmdvel_to_sport 把原地转改成圆弧，甩出 0.3~0.4 m。
-    # RPP + Hybrid 调头圈实测厕所 0.13 m、前台 0.18 m，但前台绕圈空间不够（规划失败/碰撞停车，46 s）。
-    # 实测 G1 能原地转后（见 planner_server 注释）改为：2D 规划 + RPP 起步/到点原地转到朝向。
-    # 代价：RPP 不做局部绕障，只按碰撞预测减速/停车，绕障靠全局重规划。
-    # 原 MPPI 参数保留在下面的 FollowPathMPPI（不在 controller_plugins 里，不会加载），回退时改回名字即可。
+    # 控制器：只加载 controller_plugins 里的 FollowPath（各行为树写死 controller_id="FollowPath"），下面两个块：
+    #   FollowPath     shim（10-26 起现用，aid_nav_shim_controller）：离目标 >= near_goal_distance 用 MPPI 跟线 + 局部避障，
+    #                  近目标用 RPP（near.*）到点 + 原地转；外壳另做起步原地转、换动作前站稳、到点转身减速、卡住检测
+    #   FollowPathRPP  纯 RPP（10-26 前的现用值，不在 controller_plugins 里，不加载）
+    # 换成纯 RPP：把两个块名对调（FollowPath -> FollowPathShim，FollowPathRPP -> FollowPath），重启 g1-robot。
+    # shim 依据：轮式参考机 128.23；实机 RPP 31/38 到点、collision ahead 468 次 -> shim 49/50、4 次（CLAUDE.md 3.7.9 / 3.7.10）。
     FollowPath:
-      plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
-      desired_linear_vel: 0.40              # 不超过 velocity_smoother max_velocity[0] 0.45
-      lookahead_dist: 0.6
-      min_lookahead_dist: 0.4
-      max_lookahead_dist: 0.9
-      lookahead_time: 1.5
-      use_velocity_scaled_lookahead_dist: false
-      # 只在已走过的位置往前 1.0 m 内找最近路径点，路径绕回目标附近时不跳到末段
-      max_robot_pose_search_dist: 1.0
-      transform_tolerance: 0.1
-      # 【硬性安全约束】G1 收到负的 vx 会摔倒：不倒车
-      allow_reversing: false
-      # 起步时与路径朝向差 > 45° 先原地转；到点（进 xy_goal_tolerance）后原地转到目标朝向。
-      # 0.6 rad/s = cmdvel_to_sport 的 min_wz（再小会被抬到 0.6），遥控实测原地转约 0.4~0.8 rad/s。
-      use_rotate_to_heading: true
-      rotate_to_heading_angular_vel: 0.6
-      rotate_to_heading_min_angle: 0.785
+      plugin: "aid_nav_shim_controller::NavShimController"
+      primary_controller: "nav2_mppi_controller::MPPIController"
+      near_goal_controller: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+      near_goal_distance: 0.6
+      near_goal_exit_hysteresis: 0.3
+      near_goal_fallback_to_primary: true
+      # 新目标起步时朝向偏离路径 > 45° 先原地转（转速同 RPP 本机值 0.9）；行驶中不检查（会和 MPPI 绕障来回抢）
+      rotate_to_heading: true
+      rotate_only_on_new_goal: true
+      rotate_start_angle: 0.785
+      rotate_stop_angle: 0.3
+      rotate_angular_vel: 0.9
       max_angular_accel: 3.2
-      # 弯道减速：半径 < 0.9 m 时按曲率降速，最低 0.25
-      use_regulated_linear_velocity_scaling: true
-      regulated_linear_scaling_min_radius: 0.9
-      regulated_linear_scaling_min_speed: 0.25
-      use_cost_regulated_linear_velocity_scaling: false
-      cost_scaling_dist: 0.6
-      cost_scaling_gain: 1.0
-      inflation_cost_scaling_factor: 8.0
-      # 进点减速（低于 0.3 会被 cmdvel_to_sport 抬到 min_vx 0.3，实际不会更慢）
-      approach_velocity_scaling_dist: 0.6
-      min_approach_linear_velocity: 0.05
-      use_fixed_curvature_lookahead: false
-      curvature_lookahead_dist: 0.6
-      interpolate_curvature_after_goal: false
-      # 碰撞预测：沿当前指令前推 1.0 s 内会撞就停车（不绕障）
-      use_collision_detection: true
-      max_allowed_time_to_collision_up_to_carrot: 1.0
+      forward_sampling_distance: 0.6
+      # 卡住检测：MPPI 阶段沿路径剩余长度 10 s 内没缩短 0.25 m 就报失败，交给行为树恢复
+      stall_timeout: 10.0
+      stall_min_progress: 0.25
+      stall_detour_reset: 0.3
+      # 换动作（走 / 左转 / 右转 / 后退 / 停后再动）前先站稳：上个动作结束后至少站 settle_time 秒，且 odom 降到
+      # |vx| < settle_max_linear、|wz| < settle_max_angular（最多等 settle_max_time 秒）才放行下一个动作。
+      # 实机 10-26 到点急停后 0.1 s 就原地转、转完 0.5 s 就起步，身体还在冲 / 转（摔倒风险）。settle_time 0.0 = 关。
+      # 同一动作短暂中断（MPPI 单次失败 / 中止重发）而身体还在按它动时直接接上（代码里，无参数）。
+      # 10-27 实机 settle_time 0.6：展厅 S 弯 MPPI 走 / 转来回切，身体已停也每次站满 0.6 s，13 s 原地不动触发卡住检测 → 0.3。
+      # 动作类别按发给桥之前的指令判：|vx| >= motion_vx_threshold 算走 / 退，否则 |wz| >= motion_wz_threshold 算转。
+      # settle_mid_path false：只在到点（近目标 / 到点转身）和起步（起步原地转、对正后第一步）等，路途中间（MPPI 跟线：
+      # 弯道、绕障、MPPI 失败重发）不等 = 10-26 晚不等站稳时的行为（实机 S 弯 16 趟一路走过去）。
+      # 10-27 上午全程等（0.6）：S 弯 MPPI 走 / 转犹豫、单次失败都变成"刹停—站—起步"，噔噔噔差点摔。true = 全程等。
+      settle_time: 0.3
+      settle_mid_path: false
+      settle_max_time: 1.2
+      settle_max_linear: 0.15
+      settle_max_angular: 0.3
+      motion_vx_threshold: 0.05
+      motion_wz_threshold: 0.15
+      # 到点最后转身：进到 xy 容差内（留 final_rotate_xy_margin 余量）后不再交给 RPP，原地转向目标朝向，方向一开始定下
+      # （误差 > 2.6 rad 时不换向），快到位按 final_rotate_decel 减速、到位时 final_rotate_min_vel；漂出 xy 容差就交回 RPP。
+      # 实机 10-26 原来转一半换向 / 0.9 rad/s 急刹多转 ~9°。false = 关（回到 RPP 自己转）。
+      final_rotate: true
+      final_rotate_min_vel: 0.35
+      final_rotate_decel: 1.5
+      final_rotate_xy_margin: 0.05
+      # 仿真（src/test/nav_goal_sim ctrl_shim_settle.yaml，回放 10-26 实机目标 114 趟）：身体没停稳就换动作 3.2 → 0.2 次/趟，
+      # 停稳后航向误差 9° → 4°，到点 114/114，每趟多 ~2 s；避障场景结果不变。
 
-    FollowPathMPPI:
-      plugin: "nav2_mppi_controller::MPPIController"
+      # ---- primary：MPPI（离目标 >= near_goal_distance） ----
+      # 与 RPP 同名的 transform_tolerance / max_robot_pose_search_dist 落在 FollowPath.* 下，这里是 MPPI 的值
       time_steps: 40
       model_dt: 0.10
       batch_size: 2000
@@ -115,9 +131,8 @@ controller_server:
       max_robot_pose_search_dist: 2.5
       enforce_path_inversion: true
 
-      # 【硬性安全约束，不得放宽】G1 收到负的 vx 会摔倒，vx_min 必须恒为 0.0。
-      # 不要为了"被困时能脱困"把它改成负值——脱困只能靠 BT 的 Spin/BackUp 行为，
-      # 且 BackUp 行为同样会下发负速度，在本机上也必须禁用或改用原地转向替代。
+      # 【硬性安全约束】vx_min 必须恒为 0.0：正常行走不后退（带 Thor 背包的 G1 收到负 vx 会摔）。
+      # 后退只给 BT 的 BackUp 脱困用（直线、0.3 m/s，见 bt_navigator / velocity_smoother / 桥接 max_reverse_vx）。
       # 2026-09-22 演示前降速：0.7 的制动距离与转向漂移都偏大。
       vx_max: 0.45
       vx_min: 0.0
@@ -228,6 +243,88 @@ controller_server:
         max_angle_to_furthest: 1.0
         forward_preference: true
 
+      # ---- near：RPP（离目标 < near_goal_distance），与下面 FollowPathRPP 同值 ----
+      near:
+        desired_linear_vel: 0.40              # 不超过 velocity_smoother max_velocity[0] 0.45
+        lookahead_dist: 0.6
+        min_lookahead_dist: 0.4
+        max_lookahead_dist: 0.9
+        lookahead_time: 1.5
+        use_velocity_scaled_lookahead_dist: false
+        # 只在已走过的位置往前 1.0 m 内找最近路径点，路径绕回目标附近时不跳到末段
+        max_robot_pose_search_dist: 1.0
+        transform_tolerance: 0.1
+        # 【硬性安全约束】G1 收到负的 vx 会摔倒：不倒车
+        allow_reversing: false
+        # 起步时与路径朝向差 > 45° 先原地转；到点（进 xy_goal_tolerance）后原地转到目标朝向。
+        # 无背包的 G1：|wz| <= 0.29 完全不转（桥接 min_wz 0.32）；转得越快漂得越少（逆时针 0.6 -> 0.22~0.33 m、1.0 -> 0.08~0.10，
+        # motion_test_1025_2027），0.9 = velocity_smoother max_velocity[2] 上限。（带背包的 G1 原为 0.6 = 当时桥接 min_wz）
+        use_rotate_to_heading: true
+        rotate_to_heading_angular_vel: 0.9
+        rotate_to_heading_min_angle: 0.785
+        max_angular_accel: 3.2
+        # 弯道减速：半径 < 0.9 m 时按曲率降速，最低 0.25
+        use_regulated_linear_velocity_scaling: true
+        regulated_linear_scaling_min_radius: 0.9
+        regulated_linear_scaling_min_speed: 0.25
+        use_cost_regulated_linear_velocity_scaling: false
+        cost_scaling_dist: 0.6
+        cost_scaling_gain: 1.0
+        inflation_cost_scaling_factor: 8.0
+        # 进点减速（低于 0.3 会被 cmdvel_to_sport 抬到 min_vx 0.3，实际不会更慢）
+        approach_velocity_scaling_dist: 0.6
+        min_approach_linear_velocity: 0.05
+        use_fixed_curvature_lookahead: false
+        curvature_lookahead_dist: 0.6
+        interpolate_curvature_after_goal: false
+        # 碰撞预测：沿当前指令前推 1.0 s 内会撞就停车（不绕障）
+        use_collision_detection: true
+        max_allowed_time_to_collision_up_to_carrot: 1.0
+
+    # 2026-10-06 控制器 MPPI -> Regulated Pure Pursuit（未仿真，直接上 128.146 实测）。
+    # MPPI 离目标近时由 GoalCritic 直接拉向终点、到点后原地转，当时 cmdvel_to_sport 把原地转改成圆弧，甩出 0.3~0.4 m。
+    # RPP + Hybrid 调头圈实测厕所 0.13 m、前台 0.18 m，但前台绕圈空间不够（规划失败/碰撞停车，46 s）。
+    # 实测 G1 能原地转后（见 planner_server 注释）改为：2D 规划 + RPP 起步/到点原地转到朝向。
+    # 代价：RPP 不做局部绕障，只按碰撞预测减速/停车，绕障靠全局重规划。
+    # 10-26 起换 shim（远处 MPPI，即原来保留在这里的 FollowPathMPPI 参数）。
+    FollowPathRPP:
+      plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+      desired_linear_vel: 0.40              # 不超过 velocity_smoother max_velocity[0] 0.45
+      lookahead_dist: 0.6
+      min_lookahead_dist: 0.4
+      max_lookahead_dist: 0.9
+      lookahead_time: 1.5
+      use_velocity_scaled_lookahead_dist: false
+      # 只在已走过的位置往前 1.0 m 内找最近路径点，路径绕回目标附近时不跳到末段
+      max_robot_pose_search_dist: 1.0
+      transform_tolerance: 0.1
+      # 【硬性安全约束】G1 收到负的 vx 会摔倒：不倒车
+      allow_reversing: false
+      # 起步时与路径朝向差 > 45° 先原地转；到点（进 xy_goal_tolerance）后原地转到目标朝向。
+      # 无背包的 G1：|wz| <= 0.29 完全不转（桥接 min_wz 0.32）；转得越快漂得越少（逆时针 0.6 -> 0.22~0.33 m、1.0 -> 0.08~0.10，
+      # motion_test_1025_2027），0.9 = velocity_smoother max_velocity[2] 上限。（带背包的 G1 原为 0.6 = 当时桥接 min_wz）
+      use_rotate_to_heading: true
+      rotate_to_heading_angular_vel: 0.9
+      rotate_to_heading_min_angle: 0.785
+      max_angular_accel: 3.2
+      # 弯道减速：半径 < 0.9 m 时按曲率降速，最低 0.25
+      use_regulated_linear_velocity_scaling: true
+      regulated_linear_scaling_min_radius: 0.9
+      regulated_linear_scaling_min_speed: 0.25
+      use_cost_regulated_linear_velocity_scaling: false
+      cost_scaling_dist: 0.6
+      cost_scaling_gain: 1.0
+      inflation_cost_scaling_factor: 8.0
+      # 进点减速（低于 0.3 会被 cmdvel_to_sport 抬到 min_vx 0.3，实际不会更慢）
+      approach_velocity_scaling_dist: 0.6
+      min_approach_linear_velocity: 0.05
+      use_fixed_curvature_lookahead: false
+      curvature_lookahead_dist: 0.6
+      interpolate_curvature_after_goal: false
+      # 碰撞预测：沿当前指令前推 1.0 s 内会撞就停车（不绕障）
+      use_collision_detection: true
+      max_allowed_time_to_collision_up_to_carrot: 1.0
+
 map_server:
   ros__parameters:
     use_sim_time: false
@@ -322,9 +419,9 @@ velocity_smoother:
     smoothing_frequency: 10.0
     scale_velocities: false
     feedback: "OPEN_LOOP"
-    # X 下限为 0，硬性禁止后退；角速度保留正负方向。
+    # x 下限 -0.3：只让 BT BackUp 的后退速度通过（= 桥接 max_reverse_vx）。MPPI vx_min 0、RPP allow_reversing false，正常行走不会给负 vx。
     max_velocity: [0.45, 0.0, 0.9]
-    min_velocity: [0.0, 0.0, -0.9]
+    min_velocity: [-0.3, 0.0, -0.9]
     max_accel: [0.35, 0.35, 0.60]
     max_decel: [-2.0, -0.35, -5.0]
     enable_stamped_cmd_vel: false
@@ -337,7 +434,10 @@ local_costmap:
     ros__parameters:
       use_sim_time: false
       global_frame: map
-      robot_base_frame: base_link
+      # 走路蟹行补偿：controller / goal_checker 取的机器人位姿来自本图的 robot_base_frame。base_link_nav 由 g1_crab_comp_frame 发布
+      # （走路时 = base_link 转 +crab_deg，停下 / 原地转时 = base_link，nav_bridge.yaml），随桥一起起。
+      # global costmap / planner / behavior_server / bt_navigator 仍用 base_link。
+      robot_base_frame: base_link_nav
       # 与 10 Hz 控制循环同步更新；5 Hz 发布已足够 RViz/前端显示。
       update_frequency: 10.0
       publish_frequency: 5.0

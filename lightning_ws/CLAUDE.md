@@ -39,7 +39,12 @@ Never spawn multiple subagents for routine debugging.
 | v1.0.0 | 10-06 `75c3c26` | 到点精度：原地转向 + SmacPlanner2D + RPP，容差 0.10（3.4）；开机自启只依赖 install；禁行区层加锁；部署脚本 |
 | v1.0.1、v2.0.0 | 10-06 `67e37d8`、`1299ce4` | 只改文档（CLAUDE.md 重构、README / HANDOFF 同步），代码同 v1.0.0 |
 | **v3.0.0** | 10-08 `0b1da34`、`c5b51fe` | **定位**：修好导航时 NDT 沿走廊拉偏（机身点 + pclomp 线搜索，3.2.9），128.146 实机验证；**网页**：导航模式叠加 local costmap 和三条规划路径（1.1） |
-| Orin 调试（未定版本号） | 10-20 `ce00fa6` ~ 10-27 `db57b50`，含 10-27 的 shim 站稳 / 到点转身、loc_params_overlay、loc_global_init | 无 Thor 背包的 G1（Orin 30524）：docker 部署、运动特性实测（2.6）、蟹行补偿、shim 控制器、动作衔接（3.7）。**也改了仓库默认值**（会随部署带到 Thor）：JumpRelock、C++ `sport_to_odom`、`cost_travel_multiplier 10`、`inflation_radius 0.85`、`robot_radius 0.40`、定时重规划 BT、网页避障半径只改 robot_radius；只给 Orin 的值都在 `tools/deploy/orin_docker/*.local.yaml` |
+| Orin 调试（未定版本号） | 10-20 `ce00fa6` ~ 10-27 `db57b50`，含 10-27 的 shim 站稳 / 到点转身、loc_params_overlay、loc_global_init | 无 Thor 背包的 G1（Orin 30524）：docker 部署、运动特性实测（2.6）、蟹行补偿、shim 控制器、动作衔接（3.7）。**也改了仓库默认值**（会随部署带到 Thor）：JumpRelock、C++ `sport_to_odom`、`cost_travel_multiplier 10`、`inflation_radius 0.85`、`robot_radius 0.40`、定时重规划 BT、网页避障半径只改 robot_radius；只给 Orin 的值原在 `tools/deploy/orin_docker/*.local.yaml`，10-27 起收进 src 默认文件 |
+
+**10-27 配置整合**：Thor 机器停用，**仓库默认值改为直接按无背包的 Orin G1 定**，原 `tools/deploy/orin_docker/*.local.yaml`、
+`/opt/G1/*.local.{yaml,xml,json}`、`nav_controller_switch.sh` 都收进 src 默认文件（对照表见 `tools/deploy/orin_docker/README.md`），
+每台机器的 local.env 只剩 D435 序列号。切控制器 = 对调 `nav2_params.yaml` 里 `FollowPath`（shim）/ `FollowPathRPP` 两个块名。
+下文凡说"覆盖文件 / 本机覆盖 / 仓库默认值给带 Thor 背包的 G1"的，都按这条理解；参数值本身没变。**两台 Orin 还没部署整合版**（仍在用覆盖文件）。
 
 维护规则：新问题解决后按"现象 / 根因 / 解决 / 验证"补到第 3 章对应小节，并在总目录加一行；没解决的写进第 4 章。
 结论要附实测数据和数据位置；过时的说法直接改掉，不要在后面追加"推翻"。
@@ -52,7 +57,7 @@ Never spawn multiple subagents for routine debugging.
 - 1.3 实测指标：定位 v3.0.0 导航 1 h 全部 0~4.2 cm；到点平均 12.9 cm、最大 19.8 cm、航向 ≤2.8°（v1.0.0 测，v3.0.0 未重测）；costmap 残影和近身噪点清零。
 
 **2. 硬性规则（动手前必读）**
-- 2.1 绝对禁止后退：带 Thor 背包的 G1 收到负 vx 会摔倒，四道防线不得放宽；仓库默认值一律不后退。唯一例外是无背包的 Orin 30524（实测能退），只经本机覆盖文件放开 BackUp 脱困。
+- 2.1 绝对禁止后退：带 Thor 背包的 G1 收到负 vx 会摔倒，四道防线不得放宽；仓库默认值一律不后退。10-27 起 Thor 停用，仓库默认值就是无背包 Orin 的（实测能退）：只放开 BT BackUp 直线脱困，控制器仍不给负 vx。
 - 2.2 编译与部署：只在 Thor 编译；部署要用户同意；用 `deploy_to_robot.sh`；运行时只能引用 install（src 会被删）。
 - 2.3 重启：只用 `g1_service.sh restart`；**重启前机器人必须在原点、朝向约 0°，重启后用激光核对定位**。
 - 2.4 DDS：启动栈和手动跑 `ros2` 前都要 source `dds_env.sh`。
@@ -60,7 +65,7 @@ Never spawn multiple subagents for routine debugging.
 - 2.6 G1 运动特性：**能原地转**（转一次偏 4~17 cm）；`min_vx 0.3` 没验证；`stateful` 必须为 true。
   以上是带 Thor 背包的 G1；**无背包的 Orin 30524**：原地转 |wz|<0.30 完全不转、绕右侧 ~0.28 m 的点画圈、转身位移 13~41 cm；
   走路转向没有死区、基本线性；**走路蟹行：只发 vx 时实际行进方向偏左 ~9.5°**；急停后身体还冲 0.27 m/s、原地转刹停后还转 0.6 rad/s（换动作要先站稳）；
-  能后退（−0.1 死区）。本机值都在覆盖文件里（`min_wz 0.32`、原地转 0.9、容差 0.3 / 0.30）。
+  能后退（−0.1 死区）。这些值 10-27 起就是仓库默认值（`min_wz 0.32`、原地转 0.9、容差 0.3 / 0.30）。
 
 **3. 问题与解决记录**
 - 3.1 建图与 LIO
@@ -204,7 +209,8 @@ MID360 /livox/lidar（CustomMsg，逐点 offset_time）+ IMU
 - BT 里的 `BackUp` 恢复节点已删除，`backup` / `drive_on_heading` 同样不得进 BT。被困时只能靠清图 / Spin / Wait。
 - `g1_cmdvel_to_sport` 对 `vx<0` 硬钳位为 0。
 - 规划器不能用 REEDS_SHEPP 之类会规划倒车的模型。
-- **例外：无 Thor 背包的 Orin 30524**（10-24 实测能稳定后退，2.6）。只用本机覆盖文件放开 BT 脱困后退，仓库默认值不变，测试 `test_never_reverse` 照旧守着：
+- **例外：无 Thor 背包的 Orin**（10-24 实测能稳定后退，2.6）。**10-27 起这就是仓库默认值**（Thor 停用；下面两个覆盖文件已收进 `nav2_params.yaml` / `nav_bridge.yaml`，
+  测试改名 `test_reverse_only_for_backup`，守着三处一致、MPPI `vx_min 0`、RPP `allow_reversing false`、桥接代码默认 0）。原来的做法：
   `tools/deploy/orin_docker/nav2_params.local.yaml`（换成带 `BackUp` 的行为树 `navigate_w_recovery_backup_…xml`，退 0.25 m / 0.3 m/s；smoother `min_velocity[0] −0.3`）
   + `nav_bridge.local.yaml`（`max_reverse_vx 0.3`、`min_reverse_vx 0.25`，只允许直线后退）。RPP `allow_reversing` 仍为 false。三处数值由 `test_orin_backup_overlay` 守着要一致。
   **不得把这两个文件或带 BackUp 的行为树用到带背包的 G1 上。**
@@ -637,8 +643,8 @@ BGE-M3 从本地目录 `/home/unitree/models/bge-m3` 加载（Thor 不方便联�
 
 ### 3.7 无 Thor 背包的 G1（Orin 30524）导航调试（10-24~10-27）
 
-机器和本机参数见 1.2，运动特性实测见 2.6，还没解决的见 4.1、4.2、4.13~4.18。本节的值除特别说明外，都只在 `tools/deploy/orin_docker/*.local.yaml` 里，
-**不要改回仓库默认值，也不要用到带背包的 G1 上**。仿真都在 `src/test/nav_goal_sim/`（README 有表）。
+机器和本机参数见 1.2，运动特性实测见 2.6，还没解决的见 4.1、4.2、4.13~4.18。本节的值原来只在 `tools/deploy/orin_docker/*.local.yaml` 里，
+**10-27 起已收进 src 默认文件**（Thor 停用，见开头"配置整合"）。仿真都在 `src/test/nav_goal_sim/`（README 有表）。
 
 #### 3.7.1 到点前绕圈、进不了容差（10-22~10-24）
 - 现象：目标周围半径 ~0.23 m 绕圈 50~75 s，最长 2.5 min。`progress_checker`（0.10 m / 15 s）把绕圈算作有进展，不会自动中止，只能人工取消。
@@ -727,7 +733,7 @@ BGE-M3 从本地目录 `/home/unitree/models/bge-m3` 加载（Thor 不方便联�
   新目标起步朝向偏 >45° 先原地转到 <0.3 rad（0.9 rad/s）；**卡住检测**：MPPI 阶段 10 s 内沿路径剩余长度没缩短 0.25 m 就报失败，
   而且要一直报到 controller_server 中止，否则会被 `failure_tolerance` 吞掉。
 - 仿真（`run_shim_test.py`，7 个障碍场景，Orin 模型 + 新 BT）：迎面来人 RPP 两次都撞、shim 不撞；窄道两者都基本过不去（属于 robot_radius 的问题）。
-- 部署：10-26 装进 install（备份 `/opt/G1/backup_1026_shim/`），**17:25 切为生效**；`nav_controller_switch.sh rpp` 可切回（要重启 g1-robot）。
+- 部署：10-26 装进 install（备份 `/opt/G1/backup_1026_shim/`），**17:25 切为生效**；切回纯 RPP：10-27 起对调 `nav2_params.yaml` 里 `FollowPath` / `FollowPathRPP` 两个块名（原 `nav_controller_switch.sh` 已删），要重启 g1-robot。
 - 实机对比（RPP 16:12 包 `~/G1_bags/veljump_1026_1612` vs shim 17:34 包 `~/G1_bags/shim_1026_1734`，各自的 `_csv` 是导出）：
   | 指标 | RPP | shim |
   |---|---|---|
@@ -753,7 +759,7 @@ BGE-M3 从本地目录 `/home/unitree/models/bge-m3` 加载（Thor 不方便联�
     动作类别按发给桥之前的指令判（`motion_vx_threshold 0.05`、`motion_wz_threshold 0.15`）。
   - `final_rotate true`：进到 xy 容差内（留 `final_rotate_xy_margin 0.05`）后不再交给 RPP，原地转向目标朝向；方向一开始定下（误差 >2.6 rad 时不换向）；
     快到位时按 `final_rotate_decel 1.5` 减速，到位时只剩 `final_rotate_min_vel 0.35` rad/s；漂出 xy 容差就交回 RPP。
-  - **代码默认是开的，覆盖文件里显式写出；删掉那几行 ≠ 关**。要关：在 `nav2_params.shim.local.yaml` 的 `controller_server.FollowPath` 下写 `settle_time: 0.0`、`final_rotate: false`。
+  - **代码默认是开的，覆盖文件里显式写出；删掉那几行 ≠ 关**。要关：在 `nav2_params.yaml`（10-27 前是 `nav2_params.shim.local.yaml`）的 `controller_server.FollowPath` 下写 `settle_time: 0.0`、`final_rotate: false`。
 - 仿真（`run_replay_test.py` 按 10-26 实机目标顺序回放 + 7 个障碍场景；对照 `ctrl_shim.yaml`，新方案 `ctrl_shim_settle.yaml`）：
   | | 旧 shim | 新 shim |
   |---|---|---|
@@ -835,6 +841,11 @@ BGE-M3 从本地目录 `/home/unitree/models/bge-m3` 加载（Thor 不方便联�
   30423 也装了 `loc_global_init`，但那台坐着，没跑。
   **15:3x、15:5x 两次 30524 是吊着的**（雷达离地 1.385 m，落地 1.234 m），上面的 −7° 横滚 / 0.24 m 可能有吊装的份；16:06 落地换朝向后 trigger：
   本节点 (4.96, 0.73, −16.5°)（第二名 0.45×），lightning (4.82, 0.78, −16.9°)，差 0.15 m → `ok_already`。
+  16:09 修：lightning `BasePoseToLidar` 换算 /initialpose 不管躯干倾斜（前倾 ~4° → 雷达放后 0.09 m），本节点改发补偿后的位姿（`base_pose_for_lightning`）。
+  16:11 重启时机器人在被搬动（LIO 陀螺零偏 1.3 rad/s），作废；**16:14 静止重启**：原点错 6.56 m → 搜索 11 s → 1.3 s relocalized，lightning (6.16, −1.35, 0.5°) 守护 GOOD、NDT 2.50，
+  与本节点差 0.15 m：lightning 初始化 / 跟踪 NDT 的最优在雷达 x 6.25，独立"点到最近地图点"剖面谷底 6.40~6.45；两处都是 lightning 偏 −x 0.15~0.2 m，
+  是两种度量的分歧（或 4.15 地图比例），改初始化消不掉；判谁对要卷尺量真值。
+  16:23 原点附近静止重启：lightning 自己初始化对，本节点差 0.09 m → `ok_already`；原点附近 x 剖面谷底宽、吻合 0.555（别处 0.63~0.70），沿 x 约束弱，不比别处准。
 
 ### 4.3 到点后原地转向的身体位移
 剩余到点误差的主要来源（v1.0.0 实测：转 90° 常从 6 cm 被甩到 20~30 cm；v3.0.0 定位更准后没重测到点误差）。可选：转完补一小段位置修正；

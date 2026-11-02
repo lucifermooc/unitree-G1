@@ -186,7 +186,10 @@ loc_guard:
   relock_max_m: 1.0
   relock_max_deg: 10.0
   relock_hint_frames: 15
-  init_yaw_search_deg: 15.0 # /initialpose 重定位时在给定航向左右搜索的范围；0 = 不搜
+  # /initialpose 重定位时在给定航向左右搜索的范围；0 = 不搜。2026-10-27 15 -> 0（Orin，原为 /opt/G1/lightning.local.yaml 覆盖）：
+  # 开机全局定位 loc_global_init 给的位姿航向误差 <1°，而航向搜索的粗匹配（5 m 体素）会把准初值带到错解（10-24 实机 1 m）。
+  # 代价：前端"在地图上拖动设置位姿"也不再搜航向，拖的航向要比较准（NDT 自己能收十几度以内）。
+  init_yaw_search_deg: 0.0
   init_yaw_search_step_deg: 3.0
 # 送给激光定位（NDT）的点云。上游行为：当前帧 + 最多 5 个历史关键帧各取最早 1001 点（按 LIO 相对位姿摆到当前帧）。
 # fasterlio.proj_kfs 管不到这条路径（上游的判断被注释掉了）。2026-09-30 起投影在副本上做并跳过当前帧自身

@@ -34,13 +34,13 @@ def generate_launch_description():
             'realsense_serial_no', default_value="'347622073141'"),
         DeclareLaunchArgument('realsense_initial_reset', default_value='false'),
         DeclareLaunchArgument(
-            'realsense_enable_color', default_value='true', choices=['true', 'false'],
-            description='点云不再需要 color；纯避障场景可设 false 省带宽'),
+            'realsense_enable_color', default_value='false', choices=['true', 'false'],
+            description='点云不需要 color（只做避障）；调试要彩色时设 true'),
         DeclareLaunchArgument(
             'realsense_depth_filters', default_value='false', choices=['true', 'false'],
             description='temporal 深度滤波（spatial 已默认开）；temporal 会用历史深度制造残影，默认关'),
-        # 深度流分辨率与帧率，如 848x480x15；'0,0,0' = rs_launch 默认（按 USB 口自选，USB2 时会降档）。
-        DeclareLaunchArgument('realsense_depth_profile', default_value='0,0,0'),
+        # 深度流分辨率与帧率（2026-10-24 起 848x480x15，省 CPU）；'0,0,0' = rs_launch 默认（按 USB 口自选，USB2 时会降档）。
+        DeclareLaunchArgument('realsense_depth_profile', default_value='848x480x15'),
         DeclareLaunchArgument('realsense_config', default_value=os.path.join(
             get_package_share_directory('robot_bringup'), 'param',
             'realsense_g1.yaml')),

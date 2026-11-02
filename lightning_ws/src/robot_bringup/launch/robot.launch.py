@@ -210,21 +210,22 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'realsense_serial_no', default_value="'347622073141'"),
         DeclareLaunchArgument('realsense_initial_reset', default_value='false'),
+        # 2026-10-24 起不用彩色、深度降到 15 Hz（原在 Orin 的 local.env）：realsense 节点 CPU 99% -> 8%，整机空闲 22% -> 43%。
         DeclareLaunchArgument(
-            'realsense_enable_color', default_value='true', choices=['true', 'false'],
-            description='点云不再需要 color；纯避障场景可设 false 省带宽'),
+            'realsense_enable_color', default_value='false', choices=['true', 'false'],
+            description='点云不需要 color（只做避障）；调试要彩色时设 true'),
         DeclareLaunchArgument(
-            'realsense_depth_profile', default_value='0,0,0',
-            description="D435 深度流，如 848x480x15；'0,0,0' = 驱动默认（USB3 下 848x480x30）"),
+            'realsense_depth_profile', default_value='848x480x15',
+            description="D435 深度流；'0,0,0' = 驱动默认（USB3 下 848x480x30）"),
         DeclareLaunchArgument(
             'bridge_params_overlay', default_value='',
-            description='叠加在 g1_nav_bridge/config/nav_bridge.yaml 之后的本机参数文件（空 = 不叠加）'),
+            description='叠加在 g1_nav_bridge/config/nav_bridge.yaml 之后的参数文件（空 = 不叠加），只给临时试参数用，常驻值改 nav_bridge.yaml'),
         DeclareLaunchArgument(
             'nav_params_overlay', default_value='',
-            description='合并到 aid_navigation2/param/nav2_params.yaml 之上的本机参数文件（空 = 不合并）'),
+            description='合并到 aid_navigation2/param/nav2_params.yaml 之上的参数文件（空 = 不合并），只给临时试参数用，常驻值改 nav2_params.yaml'),
         DeclareLaunchArgument(
             'loc_params_overlay', default_value='',
-            description='合并到 lightning default_livox.yaml 之上的本机参数文件（空 = 不合并），只作用于定位'),
+            description='合并到 lightning default_livox.yaml 之上的参数文件（空 = 不合并），只作用于定位，只给临时试参数用'),
         DeclareLaunchArgument('start_rosbridge', default_value='true'),
         DeclareLaunchArgument('start_backend', default_value='true'),
         DeclareLaunchArgument('with_ui', default_value='false'),

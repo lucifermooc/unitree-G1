@@ -1,3 +1,5 @@
+# 机器：无 Thor 背包的 G1（Orin），2026-10-27 起本文件就是它的运行值，不再用 /opt/G1/nav_bridge.local.yaml 覆盖（Thor 已停用）。
+# 机器上就地改的是 install/g1_nav_bridge/share/g1_nav_bridge/config/nav_bridge.yaml，仓库这份要同步改。
 g1_cmdvel_to_sport:
   ros__parameters:
     cmd_vel_topic: /cmd_vel_safe
@@ -8,28 +10,35 @@ g1_cmdvel_to_sport:
     # 2026-09-22 演示前回退到 0.3：0.5 会让任何非零前进指令都变成 0.5 m/s，
     # 目标点附近无法慢速接近，贴近障碍时也没有微调余地。
     min_vx: 0.3
-    min_wz: 0.6
-    # walk_min_wz：走路时（vx>=vx_stop）的最小 |wz|，不写 = min_wz（带 Thor 背包的 G1 没测过走路转向，保持旧行为）。
-    # Orin 30524 实测走路没有原地转那样的死区（10-25，wz 0.10 -> 0.06 线性），本机覆盖文件设 0（原样透传）。
+    # 2026-10-24 实测 |wz| <= 0.29 完全不转、0.30 起转（实际约 0.7~0.8 倍），0.6 -> 0.32（带背包的 G1 原为 0.6）。
+    min_wz: 0.32
+    # walk_min_wz：走路时（vx>=vx_stop）的最小 |wz|，不写 = min_wz。2026-10-25 走路时 wz 不抬速、原样透传：
+    # motion_test_1025_2031（vx 0.4，直接调 SetVelocity）走路时没有原地转那样的死区，wz 0.10 -> 实测 0.054~0.066、
+    # 0.20 -> 0.13、0.30 -> 0.21~0.23，基本线性。
+    walk_min_wz: 0.0
     # 2026-10-06 0.2 -> 0.0：G1 能原地转。128.146 遥控原地转 8 次，激光实测位移 4~17 cm（31° 6.8、58° 7.8、94° 4.2、
     # 100° 10.1、158° 16.8、330° 6.6 cm）；原来强制 vx>=0.2 让到点原地转变成圆弧，横移 0.3~0.4 m。
     turn_min_vx: 0.0
     vx_stop: 0.05
+    # 只决定原地时多小的 wz 算停。之前从导航包推出的"走路时 |wz|<0.15 不转"是测量方法错了（指令每 0.1 s 正负切换）；
+    # 按它降到 0.05 那轮跟线更差（p95 0.21 -> 0.25 m），守住 0.15。
     wz_stop: 0.15
-    # 后退（只给 BT BackUp 脱困用）：0 = 禁止，vx<0 一律钳为 0。带 Thor 背包的 G1 倒走会摔（CLAUDE.md 2.1），仓库默认必须为 0。
-    # 无背包的 G1（Orin 30524）在本机覆盖文件里放开：max 0.3、后退低速抬到 min_reverse_vx（实测 -0.1 不动、-0.2 起走）。
-    # 放开后也只允许直线后退（|wz| >= wz_stop 时 vx 置 0）。
-    max_reverse_vx: 0.0
+    # 后退（只给 BT BackUp 脱困用，= nav2_params.yaml velocity_smoother min_velocity[0]）：0 = 禁止，vx<0 一律钳为 0（代码默认）。
+    # 2026-10-24 无背包的 G1 实测：-0.1 不动，-0.2 退 0.12 m / 1.5 s，-0.3 退 0.25 m / 1.5 s，倾斜 <= 3.8°，没摔。
+    # 只允许直线后退（|wz| >= wz_stop 时 vx 置 0）。带 Thor 背包的 G1 倒走会摔，不能用这份配置。
+    max_reverse_vx: 0.3
     min_reverse_vx: 0.25
 
 g1_crab_comp_frame:
   ros__parameters:
     # 走路蟹行补偿（crab_comp.hpp）：发 TF base_link -> base_link_nav = 绕 z 转 crab_deg × g(速度)。
-    # 仓库默认 0 = 恒等（带 Thor 背包的 G1 没测过蟹行，导航仍用 base_link）；Orin 30524 在覆盖文件里设实测值。
+    # 只发 vx 时实际行进方向比机体航向偏左约 10°（motion_test_1025_2031 wz=0 直走：定位 +11.1°、里程计对骨盆 IMU +10.3°）。
+    # nav2_params.yaml 的 local costmap 用 base_link_nav，RPP / MPPI 按行进方向追线。仿真（nav_goal_sim results/track_20261025_2102*）：
+    # 横向偏差 p50 0.10 -> 0.064 m、偏一侧均值 +0.11 -> ±0.03，36 段全成功、锁死 0；10-25 实机 xte p50 0.015 m。0 = 恒等。
     odom_topic: /odom
     parent_frame: base_link
     child_frame: base_link_nav
-    crab_deg: 0.0
+    crab_deg: 10.0
     v0: 0.10
     v_full: 0.20
     tau: 0.3

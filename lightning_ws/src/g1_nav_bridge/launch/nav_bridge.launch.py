@@ -10,8 +10,7 @@ from launch_ros.actions import Node
 def _nodes(context):
     config = os.path.join(
         get_package_share_directory('g1_nav_bridge'), 'config', 'nav_bridge.yaml')
-    # 本机覆盖（如无 Thor 背包的 Orin 30524：/opt/G1/nav_bridge.local.yaml 里 min_wz 0.32）：
-    # 叠在 nav_bridge.yaml 之后，同名参数以它为准；不在仓库里，部署不会覆盖。
+    # 临时试参数用的覆盖文件：叠在 nav_bridge.yaml 之后，同名参数以它为准（常驻值直接改 nav_bridge.yaml）。
     overlay = LaunchConfiguration('bridge_params_overlay').perform(context)
     params = [config] + ([overlay] if overlay else [])
     return [
@@ -19,8 +18,7 @@ def _nodes(context):
         # 文件本身已补上 __main__ 守卫，需要时可手动 ros2 run 起来。
         Node(package='g1_nav_bridge', executable='sport_to_odom',
              name='g1_sport_to_odom', output='screen', parameters=params),
-        # 走路蟹行补偿：发 TF base_link -> base_link_nav（crab_deg 0 = 恒等，带 Thor 背包的 G1 不用这个帧）。
-        # 只有 Orin 覆盖文件把 local_costmap.robot_base_frame 改成 base_link_nav，见 crab_comp.hpp。
+        # 走路蟹行补偿：发 TF base_link -> base_link_nav（crab_deg 0 = 恒等），nav2_params.yaml 的 local costmap 用它，见 crab_comp.hpp。
         Node(package='g1_nav_bridge', executable='crab_comp_frame',
              name='g1_crab_comp_frame', output='screen', parameters=params),
         Node(

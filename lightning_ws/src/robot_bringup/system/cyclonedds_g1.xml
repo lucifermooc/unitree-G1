@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  G1 外挂计算机（Thor）的 CycloneDDS 配置。system/dds_env.sh 把本文件设成 CYCLONEDDS_URI
+  G1 计算机的 CycloneDDS 配置（2026-10-27 起按 G1 自带 Orin NX：内网口 eth0 = 192.168.123.164；Thor 已停用，原为 enP2p1s0）。system/dds_env.sh 把本文件设成 CYCLONEDDS_URI
   （开机自启 script/g1_autostart.sh 会 source 它），覆盖 /home/unitree/unitree_ros2/setup.sh 里的默认值（默认值只绑定网卡、不限制组播）。
   robot.launch.py 自己不设置 DDS。
   手动开 rviz2 / ros2 CLI 的终端请先 `source <share>/robot_bringup/system/dds_env.sh`。
@@ -19,14 +19,13 @@
      ros2 CLI 就会报 "Failed to find a free participant index for domain 0"。无 Peers 时调大不增加流量。
      （上限 119；100 对应端口最高 7611，不与 domain 1 的 7650 起始端口重叠）
 
-  注意：网卡名与机器人本体网段绑定。网卡名不同的机器（如 Orin eth0）不改本文件，放一份改过网卡名的
-  /opt/G1/cyclonedds_g1.local.xml，dds_env.sh 优先用它。
+  注意：网卡名与机器人本体网段绑定（下面的 eth0）。临时换一份配置用 G1_DDS_XML=<文件> 环境变量（dds_env.sh）。
 -->
 <CycloneDDS xmlns="https://cdds.io/config">
   <Domain Id="any">
     <General>
       <Interfaces>
-        <NetworkInterface name="enP2p1s0" priority="default" multicast="default"/>
+        <NetworkInterface name="eth0" priority="default" multicast="default"/>
       </Interfaces>
       <AllowMulticast>spdp</AllowMulticast>
     </General>
